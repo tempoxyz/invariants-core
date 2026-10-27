@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
@@ -36,6 +37,18 @@ macro_rules! check {
             run: |$ctx: &$ty, emit| $crate::each($ctx, $over, $judge, emit),
         }
     };
+    (
+        id: $id:expr,
+        judge: |$ctx:ident : &$ty:ty| $body:expr $(,)?
+    ) => {
+        $crate::Check::<$ty> {
+            id: $id,
+            run: |ctx: &$ty, emit| {
+                let judge = |$ctx: &$ty| -> ::core::option::Option<$crate::Verdict> { $body };
+                emit(ctx, judge(ctx))
+            },
+        }
+    };
 }
 
 pub type Emit<'a> = &'a mut dyn FnMut(&dyn Display, Option<Verdict>);
@@ -56,6 +69,30 @@ impl<C: ?Sized> Copy for Check<C> {}
 impl<C: ?Sized> fmt::Debug for Check<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Check").field("id", &self.id).finish()
+    }
+}
+
+/// A [`Check`] of any context type, so checks of different contexts share one list.
+pub trait AnyCheck: Sync {
+    fn id(&self) -> &'static str;
+
+    /// Runs the check on `ctx` if it is the check's context type; `false` otherwise.
+    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool;
+}
+
+impl<C: 'static> AnyCheck for Check<C> {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool {
+        match ctx.downcast_ref::<C>() {
+            Some(ctx) => {
+                (self.run)(ctx, emit);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -115,22 +152,46 @@ impl Report {
 
     pub fn run<C: ?Sized>(&mut self, checks: &[Check<C>], ctx: &C) {
         for check in checks {
-            let counts = self.counts.entry(check.id).or_default();
-            let violations = &mut self.violations;
-            (check.run)(ctx, &mut |subject, verdict| {
-                counts.evaluated += 1;
-                let Some(verdict) = verdict else { return };
-                counts.armed += 1;
-                if let Verdict::Broken(detail) = verdict {
-                    counts.fired += 1;
-                    violations.push(Violation {
-                        id: check.id,
-                        subject: subject.to_string(),
-                        detail,
-                    });
-                }
+            self.record(check.id, |emit| (check.run)(ctx, emit));
+        }
+    }
+
+    /// Registers every check in `checks`, whatever its context.
+    pub fn register_any<'a>(&mut self, checks: impl IntoIterator<Item = &'a dyn AnyCheck>) {
+        for check in checks {
+            self.counts.entry(check.id()).or_default();
+        }
+    }
+
+    /// Runs the checks in `checks` whose context is `ctx`'s type.
+    pub fn run_any<'a>(
+        &mut self,
+        checks: impl IntoIterator<Item = &'a dyn AnyCheck>,
+        ctx: &dyn Any,
+    ) {
+        for check in checks {
+            self.record(check.id(), |emit| {
+                check.run_any(ctx, emit);
             });
         }
+    }
+
+    fn record(&mut self, id: &'static str, run: impl FnOnce(Emit<'_>)) {
+        let counts = self.counts.entry(id).or_default();
+        let violations = &mut self.violations;
+        run(&mut |subject, verdict| {
+            counts.evaluated += 1;
+            let Some(verdict) = verdict else { return };
+            counts.armed += 1;
+            if let Verdict::Broken(detail) = verdict {
+                counts.fired += 1;
+                violations.push(Violation {
+                    id,
+                    subject: subject.to_string(),
+                    detail,
+                });
+            }
+        });
     }
 
     pub fn merge(&mut self, other: Report) {
