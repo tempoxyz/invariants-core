@@ -1,0 +1,14 @@
+[package]
+name = "invariants-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+serde = ["dep:serde", "alloy-primitives/serde"]
+
+[dependencies]
+alloy-primitives = { version = "1", default-features = false, features = ["std"] }
+alloy-sol-types = { version = "1", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"], optional = true }
