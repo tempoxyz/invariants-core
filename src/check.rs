@@ -1,22 +1,8 @@
 use std::any::Any;
+
+use crate::{Sig, Sink, Step, always, sometimes};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
-    Holds,
-    Broken(String),
-}
-
-impl Verdict {
-    pub fn ensure(holds: bool, detail: impl FnOnce() -> String) -> Self {
-        if holds {
-            Self::Holds
-        } else {
-            Self::Broken(detail())
-        }
-    }
-}
 
 #[macro_export]
 macro_rules! ensure {
@@ -72,14 +58,6 @@ impl<C: ?Sized> fmt::Debug for Check<C> {
     }
 }
 
-/// A [`Check`] of any context type, so checks of different contexts share one list.
-pub trait AnyCheck: Sync {
-    fn id(&self) -> &'static str;
-
-    /// Runs the check on `ctx` if it is the check's context type; `false` otherwise.
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool;
-}
-
 impl<C: 'static> AnyCheck for Check<C> {
     fn id(&self) -> &'static str {
         self.id
@@ -96,16 +74,28 @@ impl<C: 'static> AnyCheck for Check<C> {
     }
 }
 
-pub fn each<C: ?Sized, S: Display>(
-    ctx: &C,
-    subjects: impl IntoIterator<Item = S>,
-    judge: impl Fn(&C, &S) -> Option<Verdict>,
-    emit: Emit<'_>,
-) {
-    for subject in subjects {
-        let verdict = judge(ctx, &subject);
-        emit(&subject, verdict);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Holds,
+    Broken(String),
+}
+
+impl Verdict {
+    pub fn ensure(holds: bool, detail: impl FnOnce() -> String) -> Self {
+        if holds {
+            Self::Holds
+        } else {
+            Self::Broken(detail())
+        }
     }
+}
+
+/// A [`Check`] of any context type, so checks of different contexts share one list.
+pub trait AnyCheck: Sync {
+    fn id(&self) -> &'static str;
+
+    /// Runs the check on `ctx` if it is the check's context type; `false` otherwise.
+    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -211,37 +201,6 @@ impl Report {
     }
 }
 
-/// Runs `checks` on `ctx` as assertions: per subject, `sometimes` under `<id>/armed` (whether it
-/// was armed) and, when armed, `always` under `<id>` (whether it held).
-pub fn assert<C: ?Sized, S: crate::Sink + ?Sized>(checks: &[Check<C>], ctx: &C, sink: &mut S) {
-    for check in checks {
-        let armed_sig = crate::Sig::coverage("{}/armed").fill(&[&check.id]);
-        let held_sig = crate::Sig::failure("{}").fill(&[&check.id]);
-        (check.run)(ctx, &mut |subject, verdict| {
-            crate::sometimes(
-                &mut *sink,
-                armed_sig.clone(),
-                verdict.is_some(),
-                subject.to_string(),
-            );
-            match verdict {
-                None => {}
-                Some(Verdict::Holds) => {
-                    crate::always(&mut *sink, held_sig.clone(), true, subject.to_string());
-                }
-                Some(Verdict::Broken(detail)) => {
-                    crate::always(
-                        &mut *sink,
-                        held_sig.clone(),
-                        false,
-                        format!("{subject} {detail}"),
-                    );
-                }
-            }
-        });
-    }
-}
-
 /// A context whose checks are known from its type.
 pub trait Checked: Sized + 'static {
     const CHECKS: &'static [Check<Self>];
@@ -251,5 +210,57 @@ pub trait Checked: Sized + 'static {
         let mut report = Report::default();
         report.run(Self::CHECKS, self);
         report.violations
+    }
+}
+
+/// A model whose steps have checks: a [`Step`] over it is [`Checked`] against them.
+pub trait StepChecked<T: 'static = ()>: Sized + 'static {
+    const STEP_CHECKS: &'static [Check<Step<Self, T>>];
+}
+
+impl<M: StepChecked<T>, T: 'static> Checked for Step<M, T> {
+    const CHECKS: &'static [Check<Self>] = M::STEP_CHECKS;
+}
+
+pub fn each<C: ?Sized, S: Display>(
+    ctx: &C,
+    subjects: impl IntoIterator<Item = S>,
+    judge: impl Fn(&C, &S) -> Option<Verdict>,
+    emit: Emit<'_>,
+) {
+    for subject in subjects {
+        let verdict = judge(ctx, &subject);
+        emit(&subject, verdict);
+    }
+}
+
+/// Runs `checks` on `ctx` as assertions: per subject, `sometimes` under `<id>/armed` (whether it
+/// was armed) and, when armed, `always` under `<id>` (whether it held).
+pub fn assert<C: ?Sized, S: Sink + ?Sized>(checks: &[Check<C>], ctx: &C, sink: &mut S) {
+    for check in checks {
+        let armed_sig = Sig::coverage("{}/armed").fill(&[&check.id]);
+        let held_sig = Sig::failure("{}").fill(&[&check.id]);
+        (check.run)(ctx, &mut |subject, verdict| {
+            sometimes(
+                &mut *sink,
+                armed_sig.clone(),
+                verdict.is_some(),
+                subject.to_string(),
+            );
+            match verdict {
+                None => {}
+                Some(Verdict::Holds) => {
+                    always(&mut *sink, held_sig.clone(), true, subject.to_string());
+                }
+                Some(Verdict::Broken(detail)) => {
+                    always(
+                        &mut *sink,
+                        held_sig.clone(),
+                        false,
+                        format!("{subject} {detail}"),
+                    );
+                }
+            }
+        });
     }
 }

@@ -23,7 +23,7 @@ pub fn net_delta<'a>(changes: impl IntoIterator<Item = &'a SlotChange>) -> Optio
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step<M, T> {
+pub struct Step<M, T = ()> {
     pub pre: M,
     pub post: M,
     pub changes: Vec<SlotChange>,
