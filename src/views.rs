@@ -143,3 +143,12 @@ where
         Ok((self.0)(calls)?.into_iter().map(Some).collect())
     }
 }
+
+/// `read`'s value, `None` when nothing answered it.
+pub fn answered<T, E>(read: Result<T, ObserveError<E>>) -> Result<Option<T>, ObserveError<E>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if err.is_not_answered() => Ok(None),
+        Err(err) => Err(err),
+    }
+}
