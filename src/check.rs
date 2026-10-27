@@ -178,3 +178,15 @@ pub fn assert<C: ?Sized, S: crate::Sink + ?Sized>(checks: &[Check<C>], ctx: &C, 
         });
     }
 }
+
+/// A context whose checks are known from its type.
+pub trait Checked: Sized + 'static {
+    const CHECKS: &'static [Check<Self>];
+
+    /// The violations of [`Self::CHECKS`] in `self`.
+    fn check(&self) -> Vec<Violation> {
+        let mut report = Report::default();
+        report.run(Self::CHECKS, self);
+        report.violations
+    }
+}
