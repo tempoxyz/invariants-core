@@ -123,3 +123,23 @@ pub fn decode<C: SolCall, E>(
         }),
     }
 }
+
+pub struct Complete<F>(pub F);
+
+pub fn complete<F, E>(call: F) -> Complete<F>
+where
+    F: FnMut(&[(Address, Bytes)]) -> Result<Vec<Bytes>, E>,
+{
+    Complete(call)
+}
+
+impl<E, F> Views for Complete<F>
+where
+    F: FnMut(&[(Address, Bytes)]) -> Result<Vec<Bytes>, E>,
+{
+    type Error = E;
+
+    fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, E> {
+        Ok((self.0)(calls)?.into_iter().map(Some).collect())
+    }
+}
