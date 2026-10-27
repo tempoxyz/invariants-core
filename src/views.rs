@@ -7,6 +7,19 @@ pub trait Views {
     type Error;
 
     fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, Self::Error>;
+
+    /// Whether the state is partial, so a view may read a key it lacks and answer nothing.
+    fn partial(&self) -> bool {
+        false
+    }
+}
+
+/// A model read from state through [`Views`].
+pub trait Observe: Sized {
+    /// What to read, such as a token and the accounts whose balances to read.
+    type At<'a>;
+
+    fn observe<V: Views>(views: &mut V, at: Self::At<'_>) -> Result<Self, ObserveError<V::Error>>;
 }
 
 impl<E, F> Views for F
@@ -120,14 +133,8 @@ pub fn decode<C: SolCall, E>(
     }
 }
 
+/// [`Views`] that answer every call, such as a node's `eth_call`s.
 pub struct Complete<F>(pub F);
-
-pub fn complete<F, E>(call: F) -> Complete<F>
-where
-    F: FnMut(&[(Address, Bytes)]) -> Result<Vec<Bytes>, E>,
-{
-    Complete(call)
-}
 
 impl<E, F> Views for Complete<F>
 where
@@ -146,5 +153,18 @@ pub fn answered<T, E>(read: Result<T, ObserveError<E>>) -> Result<Option<T>, Obs
         Ok(value) => Ok(Some(value)),
         Err(err) if err.is_not_answered() => Ok(None),
         Err(err) => Err(err),
+    }
+}
+
+/// `read`'s value. Over [`Views::partial`] views, `None` when nothing answered it; otherwise
+/// that is an error.
+pub fn optional<V: Views + ?Sized, T>(
+    views: &V,
+    read: Result<T, ObserveError<V::Error>>,
+) -> Result<Option<T>, ObserveError<V::Error>> {
+    if views.partial() {
+        answered(read)
+    } else {
+        read.map(Some)
     }
 }

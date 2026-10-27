@@ -12,4 +12,6 @@ pub use check::{
 };
 pub use signal::{Sig, SigKind, SigName};
 pub use step::{SlotChange, Step, net_delta};
-pub use views::{Complete, ObserveError, Views, answered, complete, decode, view, view_many};
+pub use views::{
+    Complete, Observe, ObserveError, Views, answered, decode, optional, view, view_many,
+};
