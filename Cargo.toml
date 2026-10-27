@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
-serde = ["dep:serde"]
+serde = ["dep:serde", "alloy-primitives/serde"]
 
 [dependencies]
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }

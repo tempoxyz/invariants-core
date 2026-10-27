@@ -147,3 +147,34 @@ impl Report {
             .map(|(id, _)| *id)
     }
 }
+
+/// Runs `checks` on `ctx` as assertions: per subject, `sometimes` under `<id>/armed` (whether it
+/// was armed) and, when armed, `always` under `<id>` (whether it held).
+pub fn assert<C: ?Sized, S: crate::Sink + ?Sized>(checks: &[Check<C>], ctx: &C, sink: &mut S) {
+    for check in checks {
+        let armed_sig = crate::Sig::coverage("{}/armed").fill(&[&check.id]);
+        let held_sig = crate::Sig::failure("{}").fill(&[&check.id]);
+        (check.run)(ctx, &mut |subject, verdict| {
+            crate::sometimes(
+                &mut *sink,
+                armed_sig.clone(),
+                verdict.is_some(),
+                subject.to_string(),
+            );
+            match verdict {
+                None => {}
+                Some(Verdict::Holds) => {
+                    crate::always(&mut *sink, held_sig.clone(), true, subject.to_string());
+                }
+                Some(Verdict::Broken(detail)) => {
+                    crate::always(
+                        &mut *sink,
+                        held_sig.clone(),
+                        false,
+                        format!("{subject} {detail}"),
+                    );
+                }
+            }
+        });
+    }
+}
