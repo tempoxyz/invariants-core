@@ -1,8 +1,8 @@
 use std::any::Any;
-
-use crate::{Sig, Sink, Step, always, sometimes};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
+
+use crate::{Sig, Sink, Step, always, sometimes};
 
 #[macro_export]
 macro_rules! ensure {
