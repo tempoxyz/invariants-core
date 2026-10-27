@@ -86,11 +86,7 @@ pub fn view_many<V: Views, C: SolCall>(
         .into_iter();
     calls
         .iter()
-        .map(|(to, _)| match decode::<C, _>(*to, outputs.next()) {
-            Ok(value) => Ok(Some(value)),
-            Err(err) if err.is_not_answered() => Ok(None),
-            Err(err) => Err(err),
-        })
+        .map(|(to, _)| answered(decode::<C, _>(*to, outputs.next())))
         .collect()
 }
 
