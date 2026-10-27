@@ -17,7 +17,7 @@ pub trait Views {
 /// A model read from state through [`Views`].
 pub trait Observe: Sized {
     /// What to read, such as a token and the accounts whose balances to read.
-    type At<'a>;
+    type At<'a>: Copy;
 
     fn observe<V: Views>(views: &mut V, at: Self::At<'_>) -> Result<Self, ObserveError<V::Error>>;
 }

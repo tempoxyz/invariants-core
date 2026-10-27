@@ -11,7 +11,7 @@ pub use check::{
     AnyCheck, Check, Checked, Counts, Emit, Report, StepChecked, Verdict, Violation, assert, each,
 };
 pub use signal::{Sig, SigKind, SigName};
-pub use step::{SlotChange, Step, net_delta};
+pub use step::{Replay, SlotChange, Step, net_delta};
 pub use views::{
     Complete, Observe, ObserveError, Views, answered, decode, optional, view, view_many,
 };
