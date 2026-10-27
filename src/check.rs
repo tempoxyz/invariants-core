@@ -125,6 +125,7 @@ impl Counts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Violation {
     pub id: &'static str,
     pub subject: String,
@@ -138,6 +139,7 @@ impl Display for Violation {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Report {
     pub counts: BTreeMap<&'static str, Counts>,
     pub violations: Vec<Violation>,
