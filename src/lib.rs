@@ -7,7 +7,9 @@ mod views;
 pub use assertion::{
     Assertion, AssertionKind, Condition, Location, Op, Sink, Value, always, sometimes,
 };
-pub use check::{Check, Counts, Emit, Report, Verdict, Violation, assert, each, violations};
+pub use check::{
+    AnyCheck, Check, Checked, Counts, Emit, Report, StepChecked, Verdict, Violation, assert, each,
+};
 pub use signal::{Sig, SigKind, SigName};
 pub use step::{Replay, SlotChange, Step, net_delta};
 pub use views::{
