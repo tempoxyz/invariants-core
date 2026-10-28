@@ -22,6 +22,8 @@ pub trait Observe: Sized {
     fn observe<V: Views>(views: &mut V, at: Self::At<'_>) -> Result<Self, ObserveError<V::Error>>;
 }
 
+/// A closure answers `None` for what it lacks, so it reads partial state; wrap one that answers
+/// every call in [`Complete`].
 impl<E, F> Views for F
 where
     F: FnMut(&[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, E>,
@@ -30,6 +32,10 @@ where
 
     fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, E> {
         self(calls)
+    }
+
+    fn partial(&self) -> bool {
+        true
     }
 }
 
