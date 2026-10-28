@@ -1,8 +1,7 @@
-use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
-use crate::{Sig, Sink, Step, always, sometimes};
+use crate::{Sig, Sink, always, sometimes};
 
 #[macro_export]
 macro_rules! ensure {
@@ -58,22 +57,6 @@ impl<C: ?Sized> fmt::Debug for Check<C> {
     }
 }
 
-impl<C: 'static> AnyCheck for Check<C> {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool {
-        match ctx.downcast_ref::<C>() {
-            Some(ctx) => {
-                (self.run)(ctx, emit);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Holds,
@@ -88,14 +71,6 @@ impl Verdict {
             Self::Broken(detail())
         }
     }
-}
-
-/// A [`Check`] of any context type, so checks of different contexts share one list.
-pub trait AnyCheck: Sync {
-    fn id(&self) -> &'static str;
-
-    /// Runs the check on `ctx` if it is the check's context type; `false` otherwise.
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -148,26 +123,6 @@ impl Report {
         }
     }
 
-    /// Registers every check in `checks`, whatever its context.
-    pub fn register_any<'a>(&mut self, checks: impl IntoIterator<Item = &'a dyn AnyCheck>) {
-        for check in checks {
-            self.counts.entry(check.id()).or_default();
-        }
-    }
-
-    /// Runs the checks in `checks` whose context is `ctx`'s type.
-    pub fn run_any<'a>(
-        &mut self,
-        checks: impl IntoIterator<Item = &'a dyn AnyCheck>,
-        ctx: &dyn Any,
-    ) {
-        for check in checks {
-            self.record(check.id(), |emit| {
-                check.run_any(ctx, emit);
-            });
-        }
-    }
-
     fn record(&mut self, id: &'static str, run: impl FnOnce(Emit<'_>)) {
         let counts = self.counts.entry(id).or_default();
         let violations = &mut self.violations;
@@ -201,25 +156,11 @@ impl Report {
     }
 }
 
-/// A context whose checks are known from its type.
-pub trait Checked: Sized + 'static {
-    const CHECKS: &'static [Check<Self>];
-
-    /// The violations of [`Self::CHECKS`] in `self`.
-    fn check(&self) -> Vec<Violation> {
-        let mut report = Report::default();
-        report.run(Self::CHECKS, self);
-        report.violations
-    }
-}
-
-/// A model whose steps have checks: a [`Step`] over it is [`Checked`] against them.
-pub trait StepChecked<T: 'static = ()>: Sized + 'static {
-    const STEP_CHECKS: &'static [Check<Step<Self, T>>];
-}
-
-impl<M: StepChecked<T>, T: 'static> Checked for Step<M, T> {
-    const CHECKS: &'static [Check<Self>] = M::STEP_CHECKS;
+/// The violations of `checks` in `ctx`.
+pub fn violations<C: ?Sized>(checks: &[Check<C>], ctx: &C) -> Vec<Violation> {
+    let mut report = Report::default();
+    report.run(checks, ctx);
+    report.violations
 }
 
 pub fn each<C: ?Sized, S: Display>(
