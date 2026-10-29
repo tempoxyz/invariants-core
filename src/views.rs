@@ -7,8 +7,23 @@ pub trait Views {
     type Error;
 
     fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, Self::Error>;
+
+    /// Whether the state is partial, so a view may read a key it lacks and answer nothing.
+    fn partial(&self) -> bool {
+        false
+    }
 }
 
+/// A model read from state through [`Views`].
+pub trait Observe: Sized {
+    /// What to read, such as a token and the accounts whose balances to read.
+    type At<'a>: Copy;
+
+    fn observe<V: Views>(views: &mut V, at: Self::At<'_>) -> Result<Self, ObserveError<V::Error>>;
+}
+
+/// A closure answers `None` for what it lacks, so it reads partial state; wrap one that answers
+/// every call in [`Complete`].
 impl<E, F> Views for F
 where
     F: FnMut(&[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, E>,
@@ -17,6 +32,10 @@ where
 
     fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, E> {
         self(calls)
+    }
+
+    fn partial(&self) -> bool {
+        true
     }
 }
 
@@ -86,11 +105,7 @@ pub fn view_many<V: Views, C: SolCall>(
         .into_iter();
     calls
         .iter()
-        .map(|(to, _)| match decode::<C, _>(*to, outputs.next()) {
-            Ok(value) => Ok(Some(value)),
-            Err(err) if err.is_not_answered() => Ok(None),
-            Err(err) => Err(err),
-        })
+        .map(|(to, _)| answered(decode::<C, _>(*to, outputs.next())))
         .collect()
 }
 
@@ -121,5 +136,41 @@ pub fn decode<C: SolCall, E>(
             to,
             output: Some(output),
         }),
+    }
+}
+
+/// [`Views`] that answer every call, such as a node's `eth_call`s.
+pub struct Complete<F>(pub F);
+
+impl<E, F> Views for Complete<F>
+where
+    F: FnMut(&[(Address, Bytes)]) -> Result<Vec<Bytes>, E>,
+{
+    type Error = E;
+
+    fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, E> {
+        Ok((self.0)(calls)?.into_iter().map(Some).collect())
+    }
+}
+
+/// `read`'s value, `None` when nothing answered it.
+pub fn answered<T, E>(read: Result<T, ObserveError<E>>) -> Result<Option<T>, ObserveError<E>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if err.is_not_answered() => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// `read`'s value. Over [`Views::partial`] views, `None` when nothing answered it; otherwise
+/// that is an error.
+pub fn optional<V: Views + ?Sized, T>(
+    views: &V,
+    read: Result<T, ObserveError<V::Error>>,
+) -> Result<Option<T>, ObserveError<V::Error>> {
+    if views.partial() {
+        answered(read)
+    } else {
+        read.map(Some)
     }
 }

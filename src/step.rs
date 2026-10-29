@@ -1,4 +1,7 @@
+use std::fmt;
+
 use alloy_primitives::{Address, I256, Log, U256};
+use alloy_sol_types::SolEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlotChange {
@@ -23,7 +26,7 @@ pub fn net_delta<'a>(changes: impl IntoIterator<Item = &'a SlotChange>) -> Optio
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step<M, T> {
+pub struct Step<M, T = ()> {
     pub pre: M,
     pub post: M,
     pub changes: Vec<SlotChange>,
@@ -46,6 +49,14 @@ impl<M, T> Step<M, T> {
         self.logs.iter().filter(move |log| log.address == address)
     }
 
+    /// The `E` events `address` emitted in the step, in order; logs that do not decode as `E` are
+    /// skipped.
+    pub fn events<E: SolEvent>(&self, address: Address) -> Vec<E> {
+        self.logs_from(address)
+            .filter_map(|log| E::decode_log_data(&log.data).ok())
+            .collect()
+    }
+
     pub fn with_models<N>(self, pre: N, post: N) -> Step<N, T> {
         Step {
             pre,
@@ -55,4 +66,13 @@ impl<M, T> Step<M, T> {
             tx: self.tx,
         }
     }
+}
+
+/// A model that events change: the model before a step with the step's events replayed onto it
+/// is the model after the step.
+pub trait Replay<E>: Sized {
+    /// Why the events do not apply, such as a balance that would leave its type.
+    type Error: fmt::Display;
+
+    fn replay(&self, events: &[E]) -> Result<Self, Self::Error>;
 }
