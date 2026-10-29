@@ -1,7 +1,9 @@
 use std::fmt;
 
 use alloy_primitives::{Address, I256, Log, U256};
-use alloy_sol_types::SolEvent;
+use alloy_sol_types::{SolCall, SolEvent};
+
+use crate::Frame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlotChange {
@@ -31,6 +33,9 @@ pub struct Step<M, T = ()> {
     pub post: M,
     pub changes: Vec<SlotChange>,
     pub logs: Vec<Log>,
+    /// The step's call frames in the order they were entered; empty when the runner does not
+    /// trace calls, so a check that needs them answers nothing rather than failing.
+    pub calls: Vec<Frame>,
     pub tx: T,
 }
 
@@ -57,12 +62,30 @@ impl<M, T> Step<M, T> {
             .collect()
     }
 
+    /// The frames that ran `target`'s code on its own storage.
+    pub fn calls_to(&self, target: Address) -> impl Iterator<Item = &Frame> {
+        self.calls.iter().filter(move |frame| frame.enters(target))
+    }
+
+    /// The `C` calls into `target`, with their frames, in order.
+    pub fn calls_of<C: SolCall>(&self, target: Address) -> Vec<(&Frame, C)> {
+        self.calls_to(target)
+            .filter_map(|frame| Some((frame, frame.decode::<C>()?)))
+            .collect()
+    }
+
+    /// Whether the runner traced the step's calls.
+    pub fn traced(&self) -> bool {
+        !self.calls.is_empty()
+    }
+
     pub fn with_models<N>(self, pre: N, post: N) -> Step<N, T> {
         Step {
             pre,
             post,
             changes: self.changes,
             logs: self.logs,
+            calls: self.calls,
             tx: self.tx,
         }
     }

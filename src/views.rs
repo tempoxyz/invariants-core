@@ -8,9 +8,52 @@ pub trait Views {
 
     fn call(&mut self, calls: &[(Address, Bytes)]) -> Result<Vec<Option<Bytes>>, Self::Error>;
 
+    /// Runs `calls` as `from`, so a view that answers according to its caller (a private balance,
+    /// a getter only an owner may read) can be asked as a third party. Each answer is whether it
+    /// returned or reverted, with its data; `None` when nothing answered it. Views that cannot
+    /// set the caller answer nothing.
+    fn call_from(
+        &mut self,
+        from: Address,
+        calls: &[(Address, Bytes)],
+    ) -> Result<Vec<Option<Outcome>>, Self::Error> {
+        let _ = from;
+        Ok(vec![None; calls.len()])
+    }
+
     /// Whether the state is partial, so a view may read a key it lacks and answer nothing.
     fn partial(&self) -> bool {
         false
+    }
+}
+
+/// How a call made with [`Views::call_from`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    Return(Bytes),
+    Revert(Bytes),
+}
+
+/// `call` to `to` made as `from`: `Ok(value)` when it returned and decoded, `Err(revert data)`
+/// when it reverted; `None` when nothing answered it.
+pub fn view_from<V: Views, C: SolCall>(
+    views: &mut V,
+    from: Address,
+    to: Address,
+    call: C,
+) -> Result<Option<Result<C::Return, Bytes>>, ObserveError<V::Error>> {
+    let outcome = views
+        .call_from(from, &[(to, call.abi_encode().into())])
+        .map_err(ObserveError::Views)?
+        .into_iter()
+        .next()
+        .flatten();
+    match outcome {
+        None => Ok(None),
+        Some(Outcome::Revert(data)) => Ok(Some(Err(data))),
+        Some(Outcome::Return(data)) => {
+            decode::<C, V::Error>(to, Some(Some(data))).map(|v| Some(Ok(v)))
+        }
     }
 }
 
