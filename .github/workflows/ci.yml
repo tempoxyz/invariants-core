@@ -30,17 +30,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install nightly toolchain for the lockfile resolve
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@68a1e4645c9596fee5398dd1e2ba07f0a4aa6a71 # 2026-10-20T04-40-18Z-68a1e464
+        with:
+          toolchain: nightly-2026-10-20
+
       - name: Install Rust toolchain
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
-          rustup default 1.99.1
+        uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@68a1e4645c9596fee5398dd1e2ba07f0a4aa6a71 # 2026-10-20T04-40-18Z-68a1e464
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
 
       - name: Resolve dependencies past the cooldown
         # Cargo.lock is not committed, so resolve one from the index that skips crates published in the last 7 days, which Aegis blocks.
         env:
           CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE: 7 days
         run: |
-          rustup toolchain install nightly-2026-10-20 --profile minimal
           # Check rust-version against the toolchain that builds, not the nightly that resolves.
           RUSTC="$(rustup which --toolchain 1.99.1 rustc)" cargo +nightly-2026-10-20 -Zmin-publish-age generate-lockfile
 
