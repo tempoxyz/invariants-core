@@ -41,7 +41,8 @@ jobs:
           CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE: 7 days
         run: |
           rustup toolchain install nightly-2026-10-20 --profile minimal
-          cargo +nightly-2026-10-20 -Zmin-publish-age generate-lockfile
+          # Check rust-version against the toolchain that builds, not the nightly that resolves.
+          RUSTC="$(rustup which --toolchain 1.99.1 rustc)" cargo +nightly-2026-10-20 -Zmin-publish-age generate-lockfile
 
       - name: Check formatting
         run: cargo fmt --all --check
