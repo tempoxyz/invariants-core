@@ -36,26 +36,12 @@ jobs:
           rustup default 1.99.1
 
       - name: Resolve dependencies past the cooldown
-        # Cargo.lock is not committed, so resolve one that skips crates published in the last 7 days, which Aegis blocks.
+        # Cargo.lock is not committed, so resolve one from the index that skips crates published in the last 7 days, which Aegis blocks.
         env:
-          CARGO_COOLDOWN_VERSION: "0.3.4"
-          CARGO_COOLDOWN_ARCHIVE_SHA256: 5706c1636415b90ec8244631ff707d1c49d502779d14235d7abb65c080ac8ba6
-          CARGO_COOLDOWN_BINARY_SHA256: c9939a37768c7d0e4dbac047ea2d2e41bd1e0276db4da3752e200dd5722d1f6e
           CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE: 7 days
-          COOLDOWN_INCOMPATIBLE_PUBLISH_AGE: deny
-          COOLDOWN_LOCKFILE_BASELINE: ignore
         run: |
-          set -euo pipefail
-          root="cargo-cooldown-x86_64-unknown-linux-gnu-v${CARGO_COOLDOWN_VERSION}"
-          tmp="${RUNNER_TEMP}/cargo-cooldown"
-          mkdir -p "$tmp"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
-            --output "$tmp/$root.tgz" \
-            "https://github.com/dertin/cargo-cooldown/releases/download/v${CARGO_COOLDOWN_VERSION}/$root.tgz"
-          echo "$CARGO_COOLDOWN_ARCHIVE_SHA256  $tmp/$root.tgz" | sha256sum --check --strict
-          tar -xzf "$tmp/$root.tgz" -C "$tmp"
-          echo "$CARGO_COOLDOWN_BINARY_SHA256  $tmp/$root/cargo-cooldown" | sha256sum --check --strict
-          "$tmp/$root/cargo-cooldown" cooldown update
+          rustup toolchain install nightly-2026-10-20 --profile minimal
+          cargo +nightly-2026-10-20 -Zmin-publish-age generate-lockfile
 
       - name: Check formatting
         run: cargo fmt --all --check
