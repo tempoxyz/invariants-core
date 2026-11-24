@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
@@ -225,9 +226,10 @@ impl Counts {
 
 /// A subject that broke a check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Violation {
-    pub id: &'static str,
+    /// The check's ID, owned only once deserialized.
+    pub id: Cow<'static, str>,
     pub subject: String,
     pub detail: String,
 }
@@ -309,7 +311,7 @@ impl Report {
             if let Verdict::Broken(detail) = verdict {
                 counts.fired += 1;
                 violations.push(Violation {
-                    id,
+                    id: Cow::Borrowed(id),
                     subject: subject.to_string(),
                     detail,
                 });
