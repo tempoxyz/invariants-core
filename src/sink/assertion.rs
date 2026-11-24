@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use alloy_primitives::{I256, U256};
 
-use crate::signal::SigName;
+use super::signal::SigName;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -54,14 +54,8 @@ macro_rules! signed {
     )*};
 }
 
-unsigned!(u8, u16, u32, u64, u128, U256);
+unsigned!(u8, u16, u32, u64, u128, usize, U256);
 signed!(i8, i16, i32, i64, i128);
-
-impl From<usize> for Value {
-    fn from(value: usize) -> Self {
-        Self::Unsigned(U256::from(value))
-    }
-}
 
 impl From<isize> for Value {
     fn from(value: isize) -> Self {
