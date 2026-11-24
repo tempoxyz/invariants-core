@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
@@ -72,16 +71,17 @@ macro_rules! ensure_ge {
     ($($args:tt)+) => { $crate::__ensure_cmp!(>=, $($args)+) };
 }
 
-/// A [`Check`]: its ID, optionally its [`Meta`](crate::Meta) (`doc`, `tip`, `severity`, `since`,
-/// `until`, in that order) and a `when` guard, then either `over` (the subjects) and `judge`
-/// (one verdict per subject), or `judge` alone (one verdict for the context). A context `when`
-/// rejects is not evaluated, as a check outside its fork range is not.
+/// A [`Check`]: its ID and [`Meta`](crate::Meta) (`doc`, then optionally `tip`, `covers`,
+/// `severity`, `since` and `until`, in that order), an optional `when` guard, then either `over`
+/// (the subjects) and `judge` (one verdict per subject), or `judge` alone (one verdict for the
+/// context). A context `when` rejects is not evaluated, as a check outside its fork range is not.
 #[macro_export]
 macro_rules! check {
     (
         id: $id:expr,
-        $(doc: $doc:expr,)?
+        doc: $doc:expr,
         $(tip: $tip:expr,)?
+        $(covers: $covers:expr,)?
         $(severity: $sev:expr,)?
         $(since: $since:expr,)?
         $(until: $until:expr,)?
@@ -92,8 +92,9 @@ macro_rules! check {
         $crate::Check::<$ty, _> {
             id: $id,
             meta: $crate::Meta {
-                $(doc: $doc,)?
+                doc: $doc,
                 $(tip: ::core::option::Option::Some($tip),)?
+                $(covers: &$covers,)?
                 $(severity: ::core::option::Option::Some($sev),)?
                 $(since: ::core::option::Option::Some($since),)?
                 $(until: ::core::option::Option::Some($until),)?
@@ -112,8 +113,9 @@ macro_rules! check {
     };
     (
         id: $id:expr,
-        $(doc: $doc:expr,)?
+        doc: $doc:expr,
         $(tip: $tip:expr,)?
+        $(covers: $covers:expr,)?
         $(severity: $sev:expr,)?
         $(since: $since:expr,)?
         $(until: $until:expr,)?
@@ -122,8 +124,9 @@ macro_rules! check {
     ) => {
         $crate::check! {
             id: $id,
-            $(doc: $doc,)?
+            doc: $doc,
             $(tip: $tip,)?
+            $(covers: $covers,)?
             $(severity: $sev,)?
             $(since: $since,)?
             $(until: $until,)?
@@ -159,7 +162,7 @@ impl<C: ?Sized, F> fmt::Debug for Check<C, F> {
     }
 }
 
-impl<C: 'static, F: Sync> AnyCheck<F> for Check<C, F> {
+impl<C: ?Sized, F: Sync> AnyCheck<F> for Check<C, F> {
     fn id(&self) -> &'static str {
         self.id
     }
@@ -167,22 +170,14 @@ impl<C: 'static, F: Sync> AnyCheck<F> for Check<C, F> {
     fn meta(&self) -> &Meta<F> {
         &self.meta
     }
-
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) {
-        if let Some(ctx) = ctx.downcast_ref::<C>() {
-            (self.run)(ctx, emit);
-        }
-    }
 }
 
-/// A [`Check`] of any context type, so checks of different contexts share one list.
+/// A [`Check`]'s catalog entry, whatever its context type, so checks of every context share one
+/// list, such as the one [`crate::markdown`] renders.
 pub trait AnyCheck<F = ()>: Sync {
     fn id(&self) -> &'static str;
 
     fn meta(&self) -> &Meta<F>;
-
-    /// Runs the check on `ctx` if it is the check's context type.
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>);
 }
 
 /// Whether an armed check held for a subject, and why not.
@@ -249,13 +244,6 @@ pub struct Report {
 }
 
 impl Report {
-    /// Lists `checks` in the counts, so a check that never runs still shows up.
-    pub fn register<C: ?Sized, F>(&mut self, checks: &[Check<C, F>]) {
-        for check in checks {
-            self.counts.entry(check.id).or_default();
-        }
-    }
-
     /// Runs `checks` on `ctx`, skipping those whose [`Meta`] excludes `fork` when there is one.
     pub fn run<'a, C: ?Sized + 'a, F: Ord + 'a>(
         &mut self,
@@ -265,30 +253,6 @@ impl Report {
     ) {
         for check in checks {
             self.record(check.id, &check.meta, fork, |emit| (check.run)(ctx, emit));
-        }
-    }
-
-    /// Registers every check in `checks`, whatever its context.
-    pub fn register_any<'a, F: 'a>(
-        &mut self,
-        checks: impl IntoIterator<Item = &'a dyn AnyCheck<F>>,
-    ) {
-        for check in checks {
-            self.counts.entry(check.id()).or_default();
-        }
-    }
-
-    /// Runs the checks in `checks` whose context is `ctx`'s type, at `fork` as [`Self::run`] does.
-    pub fn run_any<'a, F: Ord + 'a>(
-        &mut self,
-        checks: impl IntoIterator<Item = &'a dyn AnyCheck<F>>,
-        ctx: &dyn Any,
-        fork: Option<&F>,
-    ) {
-        for check in checks {
-            self.record(check.id(), check.meta(), fork, |emit| {
-                check.run_any(ctx, emit)
-            });
         }
     }
 
@@ -317,22 +281,6 @@ impl Report {
                 });
             }
         });
-    }
-
-    /// Adds `other`'s counts and violations to these.
-    pub fn merge(&mut self, other: Report) {
-        for (id, counts) in other.counts {
-            self.counts.entry(id).or_default().add(counts);
-        }
-        self.violations.extend(other.violations);
-    }
-
-    /// The checks that asserted nothing, never applied if [`Counts::evaluated`] is zero.
-    pub fn never_armed(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.counts
-            .iter()
-            .filter(|(_, counts)| counts.armed == 0)
-            .map(|(id, _)| *id)
     }
 }
 

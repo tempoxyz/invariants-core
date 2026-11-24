@@ -4,9 +4,9 @@ use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::{ContractError, Panic, PanicKind, SolCall, SolError, sol};
 
 use crate::{
-    AnyCheck, Batch, Call, Check, Diff, Effects, FnViews, Fold, History, Meta, ObserveError,
-    Outcome, Report, Severity, Step, Verdict, Views, check, ensure, ensure_eq, ensure_le, markdown,
-    view, view_from,
+    Answers, AnyCheck, Batch, Call, Check, Diff, Effects, FnViews, Fold, Frame, History, Meta,
+    ObserveError, Outcome, Report, Severity, Simulate, Step, Verdict, Views, check, ensure,
+    ensure_eq, ensure_le, markdown, view, view_from,
 };
 
 sol! {
@@ -57,6 +57,7 @@ const STEP_CHECKS: &[Check<PortalStep, Fork>] = &[check! {
     id: "TEST-ADMIN-ONLY",
     doc: "Only the current admin can set a new admin.",
     tip: "TIP-0000",
+    covers: ["TEMPO-OLD-1", "TEMPO-OLD-2"],
     severity: Severity::High,
     since: Fork::T2,
     when: |s: &PortalStep| s.calls.is_some(),
@@ -78,14 +79,9 @@ fn step(effects: Effects) -> PortalStep {
 #[test]
 fn a_trace_check_judges_who_called_and_skips_untraced_steps() {
     let mut report = Report::default();
-    report.register(STEP_CHECKS);
     report.run(STEP_CHECKS, &step(Effects::default()), None);
     let counts = report.counts["TEST-ADMIN-ONLY"];
     assert_eq!((counts.evaluated, counts.armed), (0, 0));
-    assert_eq!(
-        report.never_armed().collect::<Vec<_>>(),
-        ["TEST-ADMIN-ONLY"]
-    );
 
     let returned = Outcome::Return(Bytes::new());
     report.run(STEP_CHECKS, &step(set_admin(ADMIN, returned.clone())), None);
@@ -125,7 +121,7 @@ fn metadata_gates_by_fork_and_renders_as_markdown() {
     assert_eq!((counts.evaluated, counts.armed), (0, 0));
 
     let table = markdown(STEP_CHECKS.iter().map(|c| c as &dyn AnyCheck<Fork>));
-    assert!(table.contains("| `TEST-ADMIN-ONLY` | high | T2 |  | TIP-0000 | Only the current admin can set a new admin. |"), "{table}");
+    assert!(table.contains("| `TEST-ADMIN-ONLY` | high | T2 |  | TIP-0000 | TEMPO-OLD-1, TEMPO-OLD-2 | Only the current admin can set a new admin. |"), "{table}");
 }
 
 #[test]
@@ -217,6 +213,71 @@ fn frames_expose_typed_results_and_effects_build_from_typed_events() {
     );
 
     assert_eq!(Effects::<()>::default().calls_to(PORTAL).count(), 0);
+
+    // A frame commits only when it returns, and owns the logs in its range.
+    assert_eq!(
+        frames.iter().map(|f| f.committed).collect::<Vec<_>>(),
+        [true, false, true, false]
+    );
+    assert!(effects.logs_of(&frames[0]).is_empty());
+    let emitter = Frame {
+        logs: 0..1,
+        ..frames[0].clone()
+    };
+    assert_eq!(effects.logs_of(&emitter), &effects.logs[..]);
+    let past_the_end = Frame {
+        logs: 1..3,
+        ..frames[0].clone()
+    };
+    assert!(effects.logs_of(&past_the_end).is_empty());
+}
+
+/// A counter that every call increments and answers with its new value.
+struct Counter(u64);
+
+impl Views for Counter {
+    type Error = String;
+
+    fn call(&mut self, calls: &[Call]) -> Result<Vec<Option<Outcome>>, String> {
+        let next = balanceOfCall::abi_encode_returns(&U256::from(self.0 + 1));
+        Ok(vec![Some(Outcome::Return(next.into())); calls.len()])
+    }
+
+    fn partial(&self) -> bool {
+        false
+    }
+}
+
+impl Simulate for Counter {
+    fn simulate(&mut self, calls: &[Call]) -> Result<Vec<Option<Outcome>>, String> {
+        let start = self.0;
+        let answers = (1..=calls.len() as u64)
+            .map(|n| {
+                let value = balanceOfCall::abi_encode_returns(&U256::from(start + n));
+                Some(Outcome::Return(value.into()))
+            })
+            .collect();
+        Ok(answers)
+    }
+}
+
+#[test]
+fn a_simulated_batch_sees_earlier_writes_and_a_viewed_one_does_not() {
+    let mut batch = Batch::default();
+    let read = balanceOfCall { account: ADMIN };
+    let first = batch.push(Some(ADMIN), PORTAL, &read);
+    let second = batch.push(Some(MALLORY), PORTAL, &read);
+    let mut counter = Counter(4);
+
+    let viewed = batch.run(&mut counter).unwrap();
+    let simulated = batch.simulate(&mut counter).unwrap();
+
+    let values = |answers: &Answers| {
+        [&first, &second].map(|handle| answers.decode::<_, String>(handle).unwrap())
+    };
+    assert_eq!(values(&viewed), [U256::from(5), U256::from(5)]);
+    assert_eq!(values(&simulated), [U256::from(5), U256::from(6)]);
+    assert_eq!(counter.0, 4, "nothing persists");
 }
 
 #[test]
@@ -267,9 +328,9 @@ fn views_tell_unanswered_calls_from_unexpected_ones() {
 #[test]
 fn a_batch_decodes_each_call_through_its_handle() {
     let mut batch = Batch::default();
-    let balance = batch.push(PORTAL, &balanceOfCall { account: ADMIN });
-    let set = batch.push(PORTAL, &setAdminCall { admin: ADMIN });
-    let missing = batch.push(PORTAL, &balanceOfCall { account: MALLORY });
+    let balance = batch.push(None, PORTAL, &balanceOfCall { account: ADMIN });
+    let set = batch.push(None, PORTAL, &setAdminCall { admin: ADMIN });
+    let missing = batch.push(None, PORTAL, &balanceOfCall { account: MALLORY });
     let seven = balanceOfCall::abi_encode_returns(&U256::from(7));
     let reverted = Outcome::Revert(Bytes::from_static(&[1]));
     let mut views = FnViews {
@@ -372,6 +433,7 @@ fn history_folds_steps_and_pairs_compare_two_runs() {
 
     const DIFF: &[Check<Diff<Portal>>] = &[check! {
         id: "TEST-SAME",
+        doc: "Both runs agree.",
         judge: |d: &Diff<Portal>| ensure!(d.left == d.right, "{:?} != {:?}", d.left, d.right),
     }];
     let mut report = Report::default();

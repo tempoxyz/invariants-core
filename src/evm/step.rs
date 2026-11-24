@@ -21,7 +21,8 @@ pub struct SlotChange {
 pub struct Effects<T = ()> {
     pub changes: Vec<SlotChange>,
     pub logs: Vec<Log>,
-    /// The call frames in entry order, `None` when the runner does not trace calls.
+    /// The call frames in entry order, `None` when the runner does not trace calls. Only the EVM's
+    /// own calls are frames, not a precompile's internal calls into another.
     pub calls: Option<Vec<Frame>>,
     /// What ran, such as a transaction, a system call or a block.
     pub ran: T,
@@ -52,6 +53,11 @@ impl<T> Effects<T> {
             .collect()
     }
 
+    /// The logs `frame` and the calls it made emitted.
+    pub fn logs_of(&self, frame: &Frame) -> &[Log] {
+        self.logs.get(frame.logs.clone()).unwrap_or_default()
+    }
+
     /// The frames that ran `target`'s code on its own storage, none when calls were not traced.
     pub fn calls_to(&self, target: Address) -> impl Iterator<Item = &Frame> {
         self.calls
@@ -75,7 +81,8 @@ impl<T> Effects<T> {
         self
     }
 
-    /// Appends a top-level `call` from `caller` to `target`, marking the calls traced.
+    /// Appends a top-level `call` from `caller` to `target` that emitted no logs, marking the calls
+    /// traced.
     pub fn call<C: SolCall>(
         mut self,
         caller: Address,
@@ -83,14 +90,17 @@ impl<T> Effects<T> {
         call: &C,
         outcome: Outcome,
     ) -> Self {
+        let logs = self.logs.len();
         self.calls.get_or_insert_default().push(Frame {
-            depth: 0,
+            parent: None,
             kind: CallKind::Call,
             caller,
             target,
             input: call.abi_encode().into(),
             value: U256::ZERO,
+            committed: outcome.succeeded(),
             outcome,
+            logs: logs..logs,
         });
         self
     }

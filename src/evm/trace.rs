@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, ops::Range};
 
 use alloy_primitives::{Address, Bytes, Selector, U256};
 use alloy_sol_types::SolCall;
@@ -21,8 +21,8 @@ pub enum CallKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Frame {
-    /// 0 for the transaction's own call.
-    pub depth: usize,
+    /// The frame that made this call, as an index into the step's calls, `None` for a top-level one.
+    pub parent: Option<usize>,
     pub kind: CallKind,
     /// `msg.sender` inside the frame.
     pub caller: Address,
@@ -31,6 +31,11 @@ pub struct Frame {
     pub input: Bytes,
     pub value: U256,
     pub outcome: Outcome,
+    /// Whether its effects persisted: it and every frame above it returned.
+    pub committed: bool,
+    /// The logs it and the calls it made emitted, as indices into the step's logs, empty unless
+    /// committed.
+    pub logs: Range<usize>,
 }
 
 impl Frame {

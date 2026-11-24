@@ -9,6 +9,8 @@ pub struct Meta<F = ()> {
     pub doc: &'static str,
     /// The specification that states it, such as `TIP-1137`.
     pub tip: Option<&'static str>,
+    /// The IDs of earlier invariants, such as Solidity ones, that this one replaces.
+    pub covers: &'static [&'static str],
     pub severity: Option<Severity>,
     /// The first fork the invariant holds from, every fork when `None`.
     pub since: Option<F>,
@@ -21,6 +23,7 @@ impl<F> Meta<F> {
     pub const EMPTY: Self = Self {
         doc: "",
         tip: None,
+        covers: &[],
         severity: None,
         since: None,
         until: None,

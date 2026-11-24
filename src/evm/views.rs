@@ -82,6 +82,14 @@ pub trait Views {
     fn partial(&self) -> bool;
 }
 
+/// Calls that run in order on a throwaway copy of a state, so hypothetical execution such as every
+/// holder exiting can be read.
+pub trait Simulate: Views {
+    /// Runs `calls` in order on a throwaway copy of the state, each seeing the writes of those
+    /// before it, answered as [`Views::call`] answers.
+    fn simulate(&mut self, calls: &[Call]) -> Result<Vec<Option<Outcome>>, Self::Error>;
+}
+
 /// [`Views`] answered by a closure.
 pub struct FnViews<F> {
     pub call: F,
@@ -109,6 +117,14 @@ pub trait Observe: Sized {
     type At<'a>: Copy;
 
     fn observe<V: Views>(views: &mut V, at: Self::At<'_>) -> Result<Self, ObserveError<V::Error>>;
+}
+
+/// A model read by running calls on a throwaway copy of the state through [`Simulate`].
+pub trait Probe: Sized {
+    /// What to run, such as a pool and the holders to exit it.
+    type At<'a>: Copy;
+
+    fn probe<V: Simulate>(views: &mut V, at: Self::At<'_>) -> Result<Self, ObserveError<V::Error>>;
 }
 
 /// Why a model could not be read.
@@ -190,9 +206,13 @@ impl<A: Observe, B: Observe> Pair<A, B> {
 pub struct Batch(Vec<Call>);
 
 impl Batch {
-    /// Adds `call` to `to`, from the runner's default caller.
-    pub fn push<C: SolCall>(&mut self, to: Address, call: &C) -> Handle<C> {
-        self.0.push(Call::new(to, call.abi_encode()));
+    /// Adds `call` to `to` from `from`, the runner's default caller when `None`.
+    pub fn push<C: SolCall>(&mut self, from: Option<Address>, to: Address, call: &C) -> Handle<C> {
+        self.0.push(Call {
+            from,
+            to,
+            input: call.abi_encode().into(),
+        });
         Handle {
             index: self.0.len() - 1,
             to,
@@ -200,10 +220,18 @@ impl Batch {
         }
     }
 
-    /// Runs the calls.
+    /// Runs the calls, each on the state as is.
     pub fn run<V: Views>(&self, views: &mut V) -> Result<Answers, ObserveError<V::Error>> {
         views
             .call(&self.0)
+            .map(Answers)
+            .map_err(ObserveError::Views)
+    }
+
+    /// Runs the calls in order, each seeing the writes of those before it.
+    pub fn simulate<V: Simulate>(&self, views: &mut V) -> Result<Answers, ObserveError<V::Error>> {
+        views
+            .simulate(&self.0)
             .map(Answers)
             .map_err(ObserveError::Views)
     }
@@ -247,7 +275,7 @@ pub fn view<V: Views, C: SolCall>(
     call: C,
 ) -> Result<C::Return, ObserveError<V::Error>> {
     let mut batch = Batch::default();
-    let handle = batch.push(to, &call);
+    let handle = batch.push(None, to, &call);
     batch.run(views)?.decode(&handle)
 }
 
@@ -258,17 +286,9 @@ pub fn view_from<V: Views, C: SolCall>(
     to: Address,
     call: C,
 ) -> Result<Option<Outcome>, ObserveError<V::Error>> {
-    let call = Call {
-        from: Some(from),
-        to,
-        input: call.abi_encode().into(),
-    };
-    let answers = views.call(&[call]).map_err(ObserveError::Views)?;
-    answers.into_iter().next().ok_or(ObserveError::Unexpected {
-        call: C::SIGNATURE,
-        to,
-        answer: None,
-    })
+    let mut batch = Batch::default();
+    let handle = batch.push(Some(from), to, &call);
+    Ok(batch.run(views)?.outcome(&handle).cloned())
 }
 
 /// The values `calls` returned, strictly decoded, `None` for each call nothing answered.
@@ -279,7 +299,7 @@ pub fn view_many<V: Views, C: SolCall>(
     let mut batch = Batch::default();
     let handles: Vec<_> = calls
         .iter()
-        .map(|(to, call)| batch.push(*to, call))
+        .map(|(to, call)| batch.push(None, *to, call))
         .collect();
     let answers = batch.run(views)?;
     handles
