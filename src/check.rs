@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
-use crate::{Meta, Sig, Sink, Step, always, sometimes};
+use crate::{Meta, Step};
 
 #[macro_export]
 macro_rules! ensure {
@@ -13,30 +13,67 @@ macro_rules! ensure {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __meta {
-    ($($doc:expr)?; $($tip:expr)?; $($sev:expr)?; $($since:expr)?; $($until:expr)?) => {
-        $crate::Meta {
-            doc: $crate::__first!($($doc,)? ""),
-            tip: $crate::__first!($(::core::option::Option::Some($tip),)? ::core::option::Option::None),
-            severity: $crate::__first!($(::core::option::Option::Some($sev),)? ::core::option::Option::None),
-            since: $crate::__first!($(::core::option::Option::Some($since),)? ::core::option::Option::None),
-            until: $crate::__first!($(::core::option::Option::Some($until),)? ::core::option::Option::None),
+macro_rules! __ensure_cmp {
+    ($op:tt, $x:expr, $y:expr $(, $($context:tt)+)?) => {
+        match (&$x, &$y) {
+            (x, y) => ::core::option::Option::Some($crate::Verdict::ensure(x $op y, || {
+                let cmp = ::std::format!(
+                    "{} {} {}: {:?} vs {:?}",
+                    ::core::stringify!($x),
+                    ::core::stringify!($op),
+                    ::core::stringify!($y),
+                    x,
+                    y,
+                );
+                $(let cmp = ::std::format!("{}: {cmp}", ::std::format!($($context)+));)?
+                cmp
+            })),
         }
     };
 }
 
-#[doc(hidden)]
+/// `x == y` as a verdict whose detail names both expressions and their values, after the optional
+/// context: `ensure_eq!(supply, sum, "token {token}")` breaks with
+/// `token 0x..: supply == sum: 101 vs 100`. The other `ensure_*` macros compare the same way.
 #[macro_export]
-macro_rules! __first {
-    ($first:expr $(, $rest:expr)*) => {
-        $first
-    };
+macro_rules! ensure_eq {
+    ($($args:tt)+) => { $crate::__ensure_cmp!(==, $($args)+) };
+}
+
+/// [`ensure_eq!`] for `x != y`.
+#[macro_export]
+macro_rules! ensure_ne {
+    ($($args:tt)+) => { $crate::__ensure_cmp!(!=, $($args)+) };
+}
+
+/// [`ensure_eq!`] for `x < y`.
+#[macro_export]
+macro_rules! ensure_lt {
+    ($($args:tt)+) => { $crate::__ensure_cmp!(<, $($args)+) };
+}
+
+/// [`ensure_eq!`] for `x <= y`.
+#[macro_export]
+macro_rules! ensure_le {
+    ($($args:tt)+) => { $crate::__ensure_cmp!(<=, $($args)+) };
+}
+
+/// [`ensure_eq!`] for `x > y`.
+#[macro_export]
+macro_rules! ensure_gt {
+    ($($args:tt)+) => { $crate::__ensure_cmp!(>, $($args)+) };
+}
+
+/// [`ensure_eq!`] for `x >= y`.
+#[macro_export]
+macro_rules! ensure_ge {
+    ($($args:tt)+) => { $crate::__ensure_cmp!(>=, $($args)+) };
 }
 
 /// A [`Check`]: its ID, optionally its [`Meta`](crate::Meta) (`doc`, `tip`, `severity`, `since`,
 /// `until`, in that order) and a `when` guard, then either `over` (the subjects) and `judge`
 /// (one verdict per subject), or `judge` alone (one verdict for the context). A context `when`
-/// rejects is not evaluated at all, as when the check does not apply to it.
+/// rejects counts as evaluated but not armed, as a `judge` that answers `None` does.
 #[macro_export]
 macro_rules! check {
     (
@@ -50,14 +87,21 @@ macro_rules! check {
         over: |$ctx:ident : &$ty:ty| $over:expr,
         judge: $judge:expr $(,)?
     ) => {
-        $crate::Check::<$ty> {
+        $crate::Check::<$ty, _> {
             id: $id,
-            meta: $crate::__meta!($($doc)?; $($tip)?; $($sev)?; $($since)?; $($until)?),
+            meta: $crate::Meta {
+                $(doc: $doc,)?
+                $(tip: ::core::option::Option::Some($tip),)?
+                $(severity: ::core::option::Option::Some($sev),)?
+                $(since: ::core::option::Option::Some($since),)?
+                $(until: ::core::option::Option::Some($until),)?
+                ..$crate::Meta::EMPTY
+            },
             run: |$ctx: &$ty, emit| {
                 $(
                     let when: fn(&$ty) -> bool = $when;
                     if !when($ctx) {
-                        return;
+                        return emit(&$id, ::core::option::Option::None);
                     }
                 )?
                 $crate::each($ctx, $over, $judge, emit)
@@ -74,61 +118,54 @@ macro_rules! check {
         $(when: $when:expr,)?
         judge: |$ctx:ident : &$ty:ty| $body:expr $(,)?
     ) => {
-        $crate::Check::<$ty> {
+        $crate::check! {
             id: $id,
-            meta: $crate::__meta!($($doc)?; $($tip)?; $($sev)?; $($since)?; $($until)?),
-            run: |ctx: &$ty, emit| {
-                $(
-                    let when: fn(&$ty) -> bool = $when;
-                    if !when(ctx) {
-                        return;
-                    }
-                )?
-                let judge = |$ctx: &$ty| -> ::core::option::Option<$crate::Verdict> { $body };
-                emit(ctx, judge(ctx))
-            },
+            $(doc: $doc,)?
+            $(tip: $tip,)?
+            $(severity: $sev,)?
+            $(since: $since,)?
+            $(until: $until,)?
+            $(when: $when,)?
+            over: |ctx: &$ty| [ctx],
+            judge: |$ctx: &$ty, _: &&$ty| -> ::core::option::Option<$crate::Verdict> { $body },
         }
     };
 }
 
 pub type Emit<'a> = &'a mut dyn FnMut(&dyn Display, Option<Verdict>);
 
-pub struct Check<C: ?Sized> {
+pub struct Check<C: ?Sized, F = ()> {
     pub id: &'static str,
-    pub meta: Meta,
+    pub meta: Meta<F>,
     pub run: fn(&C, Emit<'_>),
 }
 
-impl<C: ?Sized> Clone for Check<C> {
+impl<C: ?Sized, F: Copy> Clone for Check<C, F> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<C: ?Sized> Copy for Check<C> {}
+impl<C: ?Sized, F: Copy> Copy for Check<C, F> {}
 
-impl<C: ?Sized> fmt::Debug for Check<C> {
+impl<C: ?Sized, F> fmt::Debug for Check<C, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Check").field("id", &self.id).finish()
     }
 }
 
-impl<C: 'static> AnyCheck for Check<C> {
+impl<C: 'static, F: Sync> AnyCheck<F> for Check<C, F> {
     fn id(&self) -> &'static str {
         self.id
     }
 
-    fn meta(&self) -> &Meta {
+    fn meta(&self) -> &Meta<F> {
         &self.meta
     }
 
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool {
-        match ctx.downcast_ref::<C>() {
-            Some(ctx) => {
-                (self.run)(ctx, emit);
-                true
-            }
-            None => false,
+    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) {
+        if let Some(ctx) = ctx.downcast_ref::<C>() {
+            (self.run)(ctx, emit);
         }
     }
 }
@@ -150,13 +187,13 @@ impl Verdict {
 }
 
 /// A [`Check`] of any context type, so checks of different contexts share one list.
-pub trait AnyCheck: Sync {
+pub trait AnyCheck<F = ()>: Sync {
     fn id(&self) -> &'static str;
 
-    fn meta(&self) -> &Meta;
+    fn meta(&self) -> &Meta<F>;
 
-    /// Runs the check on `ctx` if it is the check's context type; `false` otherwise.
-    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>) -> bool;
+    /// Runs the check on `ctx` if it is the check's context type.
+    fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>);
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -197,61 +234,61 @@ pub struct Report {
 }
 
 impl Report {
-    pub fn register<C: ?Sized>(&mut self, checks: &[Check<C>]) {
+    pub fn register<C: ?Sized, F>(&mut self, checks: &[Check<C, F>]) {
         for check in checks {
             self.counts.entry(check.id).or_default();
         }
     }
 
-    pub fn run<C: ?Sized>(&mut self, checks: &[Check<C>], ctx: &C) {
-        self.run_where(checks, ctx, |_| true);
-    }
-
-    /// Runs the checks in `checks` whose [`Meta`] `applies` admits, such as those whose fork
-    /// bounds contain the step's fork; the others are not evaluated.
-    pub fn run_where<C: ?Sized>(
+    /// Runs `checks` on `ctx` at `fork`. A check whose [`Meta`] does not apply at `fork` counts
+    /// as evaluated but not armed; without a fork every check applies.
+    pub fn run<'a, C: ?Sized + 'a, F: Ord + 'a>(
         &mut self,
-        checks: &[Check<C>],
+        checks: impl IntoIterator<Item = &'a Check<C, F>>,
         ctx: &C,
-        applies: impl Fn(&Meta) -> bool,
+        fork: Option<&F>,
     ) {
-        for check in checks.iter().filter(|check| applies(&check.meta)) {
-            self.record(check.id, |emit| (check.run)(ctx, emit));
+        for check in checks {
+            self.record(check.id, &check.meta, fork, |emit| (check.run)(ctx, emit));
         }
     }
 
     /// Registers every check in `checks`, whatever its context.
-    pub fn register_any<'a>(&mut self, checks: impl IntoIterator<Item = &'a dyn AnyCheck>) {
+    pub fn register_any<'a, F: 'a>(
+        &mut self,
+        checks: impl IntoIterator<Item = &'a dyn AnyCheck<F>>,
+    ) {
         for check in checks {
             self.counts.entry(check.id()).or_default();
         }
     }
 
-    /// Runs the checks in `checks` whose context is `ctx`'s type.
-    pub fn run_any<'a>(
+    /// Runs the checks in `checks` whose context is `ctx`'s type, at `fork` as [`Self::run`] does.
+    pub fn run_any<'a, F: Ord + 'a>(
         &mut self,
-        checks: impl IntoIterator<Item = &'a dyn AnyCheck>,
+        checks: impl IntoIterator<Item = &'a dyn AnyCheck<F>>,
         ctx: &dyn Any,
+        fork: Option<&F>,
     ) {
-        self.run_any_where(checks, ctx, |_| true);
-    }
-
-    /// [`Self::run_any`] over the checks whose [`Meta`] `applies` admits.
-    pub fn run_any_where<'a>(
-        &mut self,
-        checks: impl IntoIterator<Item = &'a dyn AnyCheck>,
-        ctx: &dyn Any,
-        applies: impl Fn(&Meta) -> bool,
-    ) {
-        for check in checks.into_iter().filter(|check| applies(check.meta())) {
-            self.record(check.id(), |emit| {
-                check.run_any(ctx, emit);
+        for check in checks {
+            self.record(check.id(), check.meta(), fork, |emit| {
+                check.run_any(ctx, emit)
             });
         }
     }
 
-    fn record(&mut self, id: &'static str, run: impl FnOnce(Emit<'_>)) {
+    fn record<F: Ord>(
+        &mut self,
+        id: &'static str,
+        meta: &Meta<F>,
+        fork: Option<&F>,
+        run: impl FnOnce(Emit<'_>),
+    ) {
         let counts = self.counts.entry(id).or_default();
+        if fork.is_some_and(|fork| !meta.applies(fork)) {
+            counts.evaluated += 1;
+            return;
+        }
         let violations = &mut self.violations;
         run(&mut |subject, verdict| {
             counts.evaluated += 1;
@@ -284,24 +321,27 @@ impl Report {
 }
 
 /// A context whose checks are known from its type.
-pub trait Checked: Sized + 'static {
-    const CHECKS: &'static [Check<Self>];
+pub trait Checked<F: 'static = ()>: Sized + 'static {
+    const CHECKS: &'static [Check<Self, F>];
 
-    /// The violations of [`Self::CHECKS`] in `self`.
-    fn check(&self) -> Vec<Violation> {
+    /// The violations of [`Self::CHECKS`] in `self`, at every fork.
+    fn check(&self) -> Vec<Violation>
+    where
+        F: Ord,
+    {
         let mut report = Report::default();
-        report.run(Self::CHECKS, self);
+        report.run(Self::CHECKS, self, None);
         report.violations
     }
 }
 
 /// A model whose steps have checks: a [`Step`] over it is [`Checked`] against them.
-pub trait StepChecked<T: 'static = ()>: Sized + 'static {
-    const STEP_CHECKS: &'static [Check<Step<Self, T>>];
+pub trait StepChecked<T: 'static = (), F: 'static = ()>: Sized + 'static {
+    const STEP_CHECKS: &'static [Check<Step<Self, T>, F>];
 }
 
-impl<M: StepChecked<T>, T: 'static> Checked for Step<M, T> {
-    const CHECKS: &'static [Check<Self>] = M::STEP_CHECKS;
+impl<M: StepChecked<T, F>, T: 'static, F: 'static> Checked<F> for Step<M, T> {
+    const CHECKS: &'static [Check<Self, F>] = M::STEP_CHECKS;
 }
 
 pub fn each<C: ?Sized, S: Display>(
@@ -311,14 +351,20 @@ pub fn each<C: ?Sized, S: Display>(
     emit: Emit<'_>,
 ) {
     for subject in subjects {
-        let verdict = judge(ctx, &subject);
-        emit(&subject, verdict);
+        emit(&subject, judge(ctx, &subject));
     }
 }
 
 /// Runs `checks` on `ctx` as assertions: per subject, `sometimes` under `<id>/armed` (whether it
 /// was armed) and, when armed, `always` under `<id>` (whether it held).
-pub fn assert<C: ?Sized, S: Sink + ?Sized>(checks: &[Check<C>], ctx: &C, sink: &mut S) {
+#[cfg(feature = "sink")]
+pub fn assert<C: ?Sized, F, S: crate::Sink + ?Sized>(
+    checks: &[Check<C, F>],
+    ctx: &C,
+    sink: &mut S,
+) {
+    use crate::{Sig, always, sometimes};
+
     for check in checks {
         let armed_sig = Sig::coverage("{}/armed").fill(&[&check.id]);
         let held_sig = Sig::failure("{}").fill(&[&check.id]);
@@ -329,20 +375,12 @@ pub fn assert<C: ?Sized, S: Sink + ?Sized>(checks: &[Check<C>], ctx: &C, sink: &
                 verdict.is_some(),
                 subject.to_string(),
             );
-            match verdict {
-                None => {}
-                Some(Verdict::Holds) => {
-                    always(&mut *sink, held_sig.clone(), true, subject.to_string());
-                }
-                Some(Verdict::Broken(detail)) => {
-                    always(
-                        &mut *sink,
-                        held_sig.clone(),
-                        false,
-                        format!("{subject} {detail}"),
-                    );
-                }
-            }
+            let (holds, message) = match verdict {
+                None => return,
+                Some(Verdict::Holds) => (true, subject.to_string()),
+                Some(Verdict::Broken(detail)) => (false, format!("{subject} {detail}")),
+            };
+            always(&mut *sink, held_sig.clone(), holds, message);
         });
     }
 }

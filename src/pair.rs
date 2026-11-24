@@ -2,8 +2,9 @@ use std::fmt::{self, Display};
 
 use crate::{Observe, ObserveError, Views};
 
-/// Two models judged together: one domain against another (a zone at a block and Tempo at the
-/// block it anchors to), or one input run two ways ([`Diff`]).
+/// Two values judged together: one domain against another (a zone at a block and Tempo at the
+/// block it anchors to), one input run two ways ([`Diff`]), or a check's subject made of two
+/// parts, such as an owner and a spender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pair<A, B> {
     pub left: A,

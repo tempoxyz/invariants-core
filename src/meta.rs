@@ -1,22 +1,23 @@
 use std::fmt;
 
 /// What a check asserts and where it applies, kept beside the check so the readable list of
-/// invariants (see [`crate::markdown`]) and the gating of a run come from the same place.
+/// invariants (see [`crate::markdown`]) and the gating of a run come from the same place. `F` is
+/// the runner's fork type, ordered by activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Meta {
+pub struct Meta<F = ()> {
     /// The invariant in one sentence, as a specification states it.
     pub doc: &'static str,
     /// The specification that states it, such as `TIP-1137`.
     pub tip: Option<&'static str>,
     pub severity: Option<Severity>,
     /// The first fork the invariant holds from; every fork when `None`.
-    pub since: Option<&'static str>,
+    pub since: Option<F>,
     /// The first fork the invariant no longer holds from; none when `None`.
-    pub until: Option<&'static str>,
+    pub until: Option<F>,
 }
 
-impl Meta {
+impl<F> Meta<F> {
     pub const EMPTY: Self = Self {
         doc: "",
         tip: None,
@@ -25,16 +26,13 @@ impl Meta {
         until: None,
     };
 
-    /// Whether the invariant applies at a fork, given the fork's position in the runner's
-    /// ordered fork list (`position`, `None` for a fork name the runner does not know).
-    pub fn applies(&self, position: impl Fn(&str) -> Option<usize>, current: usize) -> bool {
-        let since = self
-            .since
-            .is_none_or(|fork| position(fork).is_some_and(|p| current >= p));
-        let until = self
-            .until
-            .is_none_or(|fork| position(fork).is_none_or(|p| current < p));
-        since && until
+    /// Whether the invariant applies at `fork`.
+    pub fn applies(&self, fork: &F) -> bool
+    where
+        F: Ord,
+    {
+        self.since.as_ref().is_none_or(|since| fork >= since)
+            && self.until.as_ref().is_none_or(|until| fork < until)
     }
 }
 

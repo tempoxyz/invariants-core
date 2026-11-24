@@ -1,5 +1,9 @@
+use std::fmt;
+
 use alloy_primitives::{Address, Bytes, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolInterface};
+
+use crate::Outcome;
 
 /// How a frame was entered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,29 +30,48 @@ pub struct Frame {
     pub target: Address,
     pub input: Bytes,
     pub value: U256,
-    /// Whether the frame returned rather than reverted or halted.
-    pub success: bool,
-    /// What the frame returned, or its revert data.
-    pub output: Bytes,
+    pub outcome: Outcome,
 }
 
 impl Frame {
-    pub fn selector(&self) -> Option<[u8; 4]> {
-        self.input
-            .get(..4)
-            .map(|s| s.try_into().expect("four bytes"))
-    }
-
     /// The frame's input as `C`, when its selector is `C`'s and it decodes.
     pub fn decode<C: SolCall>(&self) -> Option<C> {
-        if self.selector()? != C::SELECTOR {
-            return None;
-        }
         C::abi_decode(&self.input).ok()
+    }
+
+    /// What the frame returned as `C`'s return value, when it returned and that decodes.
+    pub fn returns<C: SolCall>(&self) -> Option<C::Return> {
+        match &self.outcome {
+            Outcome::Return(data) => C::abi_decode_returns(data).ok(),
+            _ => None,
+        }
+    }
+
+    /// The frame's revert data as one of `E`'s errors, when it reverted with one.
+    pub fn revert<E: SolInterface>(&self) -> Option<E> {
+        match &self.outcome {
+            Outcome::Revert(data) => E::abi_decode(data).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn succeeded(&self) -> bool {
+        matches!(self.outcome, Outcome::Return(_))
     }
 
     /// Whether the frame ran `target`'s code with its storage, a plain or static call to it.
     pub fn enters(&self, target: Address) -> bool {
         self.target == target && matches!(self.kind, CallKind::Call | CallKind::StaticCall)
+    }
+}
+
+/// `caller -> target 0x<selector>`.
+impl fmt::Display for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> {} 0x", self.caller, self.target)?;
+        self.input
+            .iter()
+            .take(4)
+            .try_for_each(|byte| write!(f, "{byte:02x}"))
     }
 }
