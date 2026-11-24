@@ -6,7 +6,7 @@ use alloy_sol_types::{SolCall, SolInterface, abi::AbiDecoderConfig};
 use crate::Pair;
 
 /// A call to run against state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Call {
     /// The caller, the runner's default when `None`.
     pub from: Option<Address>,
