@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, marker::PhantomData};
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolInterface, abi::AbiDecoderConfig};
@@ -74,9 +74,8 @@ impl fmt::Display for Outcome {
 pub trait Views {
     type Error;
 
-    /// Runs `calls` in order on a throwaway copy of the state, each seeing the writes before it.
+    /// Runs each of `calls` on the state as is, none seeing another's writes, like `eth_call`s.
     /// `None` answers a call nothing answered: no code, or a key a [`Self::partial`] state lacks.
-    /// Over RPC this is one `eth_simulateV1` bundle, not separate `eth_call`s.
     fn call(&mut self, calls: &[Call]) -> Result<Vec<Option<Outcome>>, Self::Error>;
 
     /// Whether the state is partial, so a call may read a key it lacks and go unanswered.
@@ -185,16 +184,71 @@ impl<A: Observe, B: Observe> Pair<A, B> {
     }
 }
 
+/// Calls of any types to run in one [`Views::call`], each read back through the [`Handle`] that
+/// [`Batch::push`] returned for it.
+#[derive(Debug, Default)]
+pub struct Batch(Vec<Call>);
+
+impl Batch {
+    /// Adds `call` to `to`, from the runner's default caller.
+    pub fn push<C: SolCall>(&mut self, to: Address, call: &C) -> Handle<C> {
+        self.0.push(Call::new(to, call.abi_encode()));
+        Handle {
+            index: self.0.len() - 1,
+            to,
+            call: PhantomData,
+        }
+    }
+
+    /// Runs the calls.
+    pub fn run<V: Views>(&self, views: &mut V) -> Result<Answers, ObserveError<V::Error>> {
+        views
+            .call(&self.0)
+            .map(Answers)
+            .map_err(ObserveError::Views)
+    }
+}
+
+/// Where a `C` call sits in its [`Batch`].
+#[derive(Debug, Clone, Copy)]
+pub struct Handle<C> {
+    index: usize,
+    to: Address,
+    call: PhantomData<fn() -> C>,
+}
+
+/// The answers to a [`Batch`]'s calls.
+#[derive(Debug)]
+pub struct Answers(Vec<Option<Outcome>>);
+
+impl Answers {
+    /// How `handle`'s call ended, `None` when nothing answered it or the views gave no answer.
+    pub fn outcome<C>(&self, handle: &Handle<C>) -> Option<&Outcome> {
+        self.0.get(handle.index)?.as_ref()
+    }
+
+    /// The value `handle`'s call returned, strictly decoded.
+    pub fn decode<C: SolCall, E>(&self, handle: &Handle<C>) -> Result<C::Return, ObserveError<E>> {
+        match self.0.get(handle.index) {
+            Some(answer) => decode::<C, E>(handle.to, answer.as_ref()),
+            None => Err(ObserveError::Unexpected {
+                call: C::SIGNATURE,
+                to: handle.to,
+                answer: None,
+            }),
+        }
+    }
+}
+
 /// The value `call` to `to` returned, strictly decoded.
 pub fn view<V: Views, C: SolCall>(
     views: &mut V,
     to: Address,
     call: C,
 ) -> Result<C::Return, ObserveError<V::Error>> {
-    let answers = views
-        .call(&[Call::new(to, call.abi_encode())])
-        .map_err(ObserveError::Views)?;
-    decode::<C, _>(to, next_answer::<C, _>(to, &mut answers.into_iter())?)
+    let mut batch = Batch::default();
+    let handle = batch.push(to, &call);
+    batch.run(views)?.decode(&handle)
 }
 
 /// How `call` to `to` made as `from` ended, `None` when nothing answered it.
@@ -210,7 +264,11 @@ pub fn view_from<V: Views, C: SolCall>(
         input: call.abi_encode().into(),
     };
     let answers = views.call(&[call]).map_err(ObserveError::Views)?;
-    next_answer::<C, _>(to, &mut answers.into_iter())
+    answers.into_iter().next().ok_or(ObserveError::Unexpected {
+        call: C::SIGNATURE,
+        to,
+        answer: None,
+    })
 }
 
 /// The values `calls` returned, strictly decoded, `None` for each call nothing answered.
@@ -218,36 +276,22 @@ pub fn view_many<V: Views, C: SolCall>(
     views: &mut V,
     calls: &[(Address, C)],
 ) -> Result<Vec<Option<C::Return>>, ObserveError<V::Error>> {
-    let encoded: Vec<Call> = calls
+    let mut batch = Batch::default();
+    let handles: Vec<_> = calls
         .iter()
-        .map(|(to, call)| Call::new(*to, call.abi_encode()))
+        .map(|(to, call)| batch.push(*to, call))
         .collect();
-    let mut answers = views
-        .call(&encoded)
-        .map_err(ObserveError::Views)?
-        .into_iter();
-    calls
+    let answers = batch.run(views)?;
+    handles
         .iter()
-        .map(|(to, _)| answered(decode::<C, _>(*to, next_answer::<C, _>(*to, &mut answers)?)))
+        .map(|handle| answered(answers.decode(handle)))
         .collect()
-}
-
-/// The next of `answers`, the one to a `C` call to `to`, or an error when the views gave no more.
-fn next_answer<C: SolCall, E>(
-    to: Address,
-    answers: &mut impl Iterator<Item = Option<Outcome>>,
-) -> Result<Option<Outcome>, ObserveError<E>> {
-    answers.next().ok_or(ObserveError::Unexpected {
-        call: C::SIGNATURE,
-        to,
-        answer: None,
-    })
 }
 
 /// The value a `C` call to `to` returned, strictly decoded from `answer` (`None` if unanswered).
 pub fn decode<C: SolCall, E>(
     to: Address,
-    answer: Option<Outcome>,
+    answer: Option<&Outcome>,
 ) -> Result<C::Return, ObserveError<E>> {
     let Some(outcome) = answer else {
         return Err(ObserveError::NotAnswered {
@@ -255,16 +299,16 @@ pub fn decode<C: SolCall, E>(
             to,
         });
     };
-    let value = match &outcome {
+    let value = match outcome {
         Outcome::Return(data) => {
             C::abi_decode_returns_with_config(data, AbiDecoderConfig::new().strict(true)).ok()
         }
         _ => None,
     };
-    value.ok_or(ObserveError::Unexpected {
+    value.ok_or_else(|| ObserveError::Unexpected {
         call: C::SIGNATURE,
         to,
-        answer: Some(outcome),
+        answer: Some(outcome.clone()),
     })
 }
 

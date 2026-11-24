@@ -4,9 +4,9 @@ use alloy_primitives::{Address, Bytes, U256, address};
 use alloy_sol_types::{ContractError, Panic, PanicKind, SolCall, SolError, sol};
 
 use crate::{
-    AnyCheck, Call, Check, Diff, Effects, FnViews, Fold, History, Meta, ObserveError, Outcome,
-    Report, Severity, Step, Verdict, Views, check, ensure, ensure_eq, ensure_le, markdown, view,
-    view_from,
+    AnyCheck, Batch, Call, Check, Diff, Effects, FnViews, Fold, History, Meta, ObserveError,
+    Outcome, Report, Severity, Step, Verdict, Views, check, ensure, ensure_eq, ensure_le, markdown,
+    view, view_from,
 };
 
 sol! {
@@ -256,6 +256,47 @@ fn views_tell_unanswered_calls_from_unexpected_ones() {
     };
     assert_eq!(
         view(&mut silent, PORTAL, balanceOfCall { account: ADMIN }),
+        Err(ObserveError::Unexpected {
+            call: balanceOfCall::SIGNATURE,
+            to: PORTAL,
+            answer: None,
+        })
+    );
+}
+
+#[test]
+fn a_batch_decodes_each_call_through_its_handle() {
+    let mut batch = Batch::default();
+    let balance = batch.push(PORTAL, &balanceOfCall { account: ADMIN });
+    let set = batch.push(PORTAL, &setAdminCall { admin: ADMIN });
+    let missing = batch.push(PORTAL, &balanceOfCall { account: MALLORY });
+    let seven = balanceOfCall::abi_encode_returns(&U256::from(7));
+    let reverted = Outcome::Revert(Bytes::from_static(&[1]));
+    let mut views = FnViews {
+        call: |calls: &[Call]| {
+            assert_eq!(calls.len(), 3);
+            Ok::<_, String>(vec![
+                Some(Outcome::Return(seven.clone().into())),
+                Some(Outcome::Revert(Bytes::from_static(&[1]))),
+            ])
+        },
+        partial: false,
+    };
+    let answers = batch.run(&mut views).unwrap();
+
+    assert_eq!(answers.decode::<_, String>(&balance), Ok(U256::from(7)));
+    assert_eq!(answers.outcome(&set), Some(&reverted));
+    assert_eq!(
+        answers.decode::<_, String>(&set).err(),
+        Some(ObserveError::Unexpected {
+            call: setAdminCall::SIGNATURE,
+            to: PORTAL,
+            answer: Some(reverted),
+        })
+    );
+    assert_eq!(answers.outcome(&missing), None);
+    assert_eq!(
+        answers.decode::<_, String>(&missing),
         Err(ObserveError::Unexpected {
             call: balanceOfCall::SIGNATURE,
             to: PORTAL,
