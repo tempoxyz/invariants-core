@@ -14,17 +14,6 @@ pub struct Call {
     pub input: Bytes,
 }
 
-impl Call {
-    /// A call to `to` from the runner's default caller.
-    pub fn new(to: Address, input: impl Into<Bytes>) -> Self {
-        Self {
-            from: None,
-            to,
-            input: input.into(),
-        }
-    }
-}
-
 /// How a call ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
