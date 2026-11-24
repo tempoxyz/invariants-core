@@ -2,8 +2,9 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
 
-use crate::{Meta, Step};
+use crate::Meta;
 
+/// `$holds` as a verdict, broken with the formatted detail.
 #[macro_export]
 macro_rules! ensure {
     ($holds:expr, $($detail:tt)+) => {
@@ -73,7 +74,7 @@ macro_rules! ensure_ge {
 /// A [`Check`]: its ID, optionally its [`Meta`](crate::Meta) (`doc`, `tip`, `severity`, `since`,
 /// `until`, in that order) and a `when` guard, then either `over` (the subjects) and `judge`
 /// (one verdict per subject), or `judge` alone (one verdict for the context). A context `when`
-/// rejects counts as evaluated but not armed, as a `judge` that answers `None` does.
+/// rejects is not evaluated, as a check outside its fork range is not.
 #[macro_export]
 macro_rules! check {
     (
@@ -101,7 +102,7 @@ macro_rules! check {
                 $(
                     let when: fn(&$ty) -> bool = $when;
                     if !when($ctx) {
-                        return emit(&$id, ::core::option::Option::None);
+                        return;
                     }
                 )?
                 $crate::each($ctx, $over, $judge, emit)
@@ -132,11 +133,14 @@ macro_rules! check {
     };
 }
 
+/// Receives each subject a check judged and its verdict, `None` when the check was not armed.
 pub type Emit<'a> = &'a mut dyn FnMut(&dyn Display, Option<Verdict>);
 
+/// An invariant over contexts of type `C`, gated by forks of type `F`.
 pub struct Check<C: ?Sized, F = ()> {
     pub id: &'static str,
     pub meta: Meta<F>,
+    /// Judges a context, emitting a verdict per subject.
     pub run: fn(&C, Emit<'_>),
 }
 
@@ -170,22 +174,6 @@ impl<C: 'static, F: Sync> AnyCheck<F> for Check<C, F> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
-    Holds,
-    Broken(String),
-}
-
-impl Verdict {
-    pub fn ensure(holds: bool, detail: impl FnOnce() -> String) -> Self {
-        if holds {
-            Self::Holds
-        } else {
-            Self::Broken(detail())
-        }
-    }
-}
-
 /// A [`Check`] of any context type, so checks of different contexts share one list.
 pub trait AnyCheck<F = ()>: Sync {
     fn id(&self) -> &'static str;
@@ -196,15 +184,38 @@ pub trait AnyCheck<F = ()>: Sync {
     fn run_any(&self, ctx: &dyn Any, emit: Emit<'_>);
 }
 
+/// Whether an armed check held for a subject, and why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Holds,
+    Broken(String),
+}
+
+impl Verdict {
+    /// `Holds` if `holds`, otherwise `Broken` with `detail()`.
+    pub fn ensure(holds: bool, detail: impl FnOnce() -> String) -> Self {
+        if holds {
+            Self::Holds
+        } else {
+            Self::Broken(detail())
+        }
+    }
+}
+
+/// How one check fared, counted per subject.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Counts {
+    /// Subjects judged, zero if the check never applied (no context, a rejecting `when`, off-fork).
     pub evaluated: u64,
+    /// Subjects whose precondition held, so the verdict asserted something.
     pub armed: u64,
+    /// Subjects that broke the invariant.
     pub fired: u64,
 }
 
 impl Counts {
+    /// Adds `other` to these counts.
     pub fn add(&mut self, other: Counts) {
         self.evaluated += other.evaluated;
         self.armed += other.armed;
@@ -212,6 +223,7 @@ impl Counts {
     }
 }
 
+/// A subject that broke a check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Violation {
@@ -226,6 +238,7 @@ impl Display for Violation {
     }
 }
 
+/// Each check's counts and the violations found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Report {
@@ -234,14 +247,14 @@ pub struct Report {
 }
 
 impl Report {
+    /// Lists `checks` in the counts, so a check that never runs still shows up.
     pub fn register<C: ?Sized, F>(&mut self, checks: &[Check<C, F>]) {
         for check in checks {
             self.counts.entry(check.id).or_default();
         }
     }
 
-    /// Runs `checks` on `ctx` at `fork`. A check whose [`Meta`] does not apply at `fork` counts
-    /// as evaluated but not armed; without a fork every check applies.
+    /// Runs `checks` on `ctx`, skipping those whose [`Meta`] excludes `fork` when there is one.
     pub fn run<'a, C: ?Sized + 'a, F: Ord + 'a>(
         &mut self,
         checks: impl IntoIterator<Item = &'a Check<C, F>>,
@@ -286,7 +299,6 @@ impl Report {
     ) {
         let counts = self.counts.entry(id).or_default();
         if fork.is_some_and(|fork| !meta.applies(fork)) {
-            counts.evaluated += 1;
             return;
         }
         let violations = &mut self.violations;
@@ -305,6 +317,7 @@ impl Report {
         });
     }
 
+    /// Adds `other`'s counts and violations to these.
     pub fn merge(&mut self, other: Report) {
         for (id, counts) in other.counts {
             self.counts.entry(id).or_default().add(counts);
@@ -312,6 +325,7 @@ impl Report {
         self.violations.extend(other.violations);
     }
 
+    /// The checks that asserted nothing, never applied if [`Counts::evaluated`] is zero.
     pub fn never_armed(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.counts
             .iter()
@@ -335,15 +349,7 @@ pub trait Checked<F: 'static = ()>: Sized + 'static {
     }
 }
 
-/// A model whose steps have checks: a [`Step`] over it is [`Checked`] against them.
-pub trait StepChecked<T: 'static = (), F: 'static = ()>: Sized + 'static {
-    const STEP_CHECKS: &'static [Check<Step<Self, T>, F>];
-}
-
-impl<M: StepChecked<T, F>, T: 'static, F: 'static> Checked<F> for Step<M, T> {
-    const CHECKS: &'static [Check<Self, F>] = M::STEP_CHECKS;
-}
-
+/// Emits `judge`'s verdict on `ctx` for each of `subjects`.
 pub fn each<C: ?Sized, S: Display>(
     ctx: &C,
     subjects: impl IntoIterator<Item = S>,
@@ -352,35 +358,5 @@ pub fn each<C: ?Sized, S: Display>(
 ) {
     for subject in subjects {
         emit(&subject, judge(ctx, &subject));
-    }
-}
-
-/// Runs `checks` on `ctx` as assertions: per subject, `sometimes` under `<id>/armed` (whether it
-/// was armed) and, when armed, `always` under `<id>` (whether it held).
-#[cfg(feature = "sink")]
-pub fn assert<C: ?Sized, F, S: crate::Sink + ?Sized>(
-    checks: &[Check<C, F>],
-    ctx: &C,
-    sink: &mut S,
-) {
-    use crate::{Sig, always, sometimes};
-
-    for check in checks {
-        let armed_sig = Sig::coverage("{}/armed").fill(&[&check.id]);
-        let held_sig = Sig::failure("{}").fill(&[&check.id]);
-        (check.run)(ctx, &mut |subject, verdict| {
-            sometimes(
-                &mut *sink,
-                armed_sig.clone(),
-                verdict.is_some(),
-                subject.to_string(),
-            );
-            let (holds, message) = match verdict {
-                None => return,
-                Some(Verdict::Holds) => (true, subject.to_string()),
-                Some(Verdict::Broken(detail)) => (false, format!("{subject} {detail}")),
-            };
-            always(&mut *sink, held_sig.clone(), holds, message);
-        });
     }
 }

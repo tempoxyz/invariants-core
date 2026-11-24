@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use alloy_primitives::{I256, U256};
 
-use crate::signal::SigName;
+use super::signal::SigName;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

@@ -1,7 +1,7 @@
-//! The crate's additions exercised the way a runner uses them.
+//! Checks, steps and views exercised the way a runner uses them.
 
 use alloy_primitives::{Address, Bytes, U256, address};
-use alloy_sol_types::{SolCall, SolError, sol};
+use alloy_sol_types::{ContractError, Panic, PanicKind, SolCall, SolError, sol};
 
 use crate::{
     AnyCheck, Call, Check, Diff, Effects, FnViews, Fold, History, Meta, ObserveError, Outcome,
@@ -62,7 +62,7 @@ const STEP_CHECKS: &[Check<PortalStep, Fork>] = &[check! {
     when: |s: &PortalStep| s.calls.is_some(),
     over: |s: &PortalStep| [&s.post],
     judge: |s, _| {
-        let (frame, _) = s.calls_of::<setAdminCall>(PORTAL).find(|(frame, _)| frame.succeeded())?;
+        let (frame, _) = s.calls_of::<setAdminCall>(PORTAL).find(|(frame, _)| frame.outcome.succeeded())?;
         ensure!(frame.caller == s.pre.admin, "setAdmin by {} while admin is {}", frame.caller, s.pre.admin)
     },
 }];
@@ -81,7 +81,7 @@ fn a_trace_check_judges_who_called_and_skips_untraced_steps() {
     report.register(STEP_CHECKS);
     report.run(STEP_CHECKS, &step(Effects::default()), None);
     let counts = report.counts["TEST-ADMIN-ONLY"];
-    assert_eq!((counts.evaluated, counts.armed), (1, 0));
+    assert_eq!((counts.evaluated, counts.armed), (0, 0));
     assert_eq!(
         report.never_armed().collect::<Vec<_>>(),
         ["TEST-ADMIN-ONLY"]
@@ -99,7 +99,7 @@ fn a_trace_check_judges_who_called_and_skips_untraced_steps() {
     assert_eq!(report.violations.len(), 1);
     assert_eq!(report.violations[0].id, "TEST-ADMIN-ONLY");
     let counts = report.counts["TEST-ADMIN-ONLY"];
-    assert_eq!((counts.evaluated, counts.armed, counts.fired), (4, 2, 1));
+    assert_eq!((counts.evaluated, counts.armed, counts.fired), (3, 2, 1));
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn metadata_gates_by_fork_and_renders_as_markdown() {
     );
     assert!(report.violations.is_empty());
     let counts = report.counts["TEST-ADMIN-ONLY"];
-    assert_eq!((counts.evaluated, counts.armed), (1, 0));
+    assert_eq!((counts.evaluated, counts.armed), (0, 0));
 
     let table = markdown(STEP_CHECKS.iter().map(|c| c as &dyn AnyCheck<Fork>));
     assert!(table.contains("| `TEST-ADMIN-ONLY` | high | T2 |  | TIP-0000 | Only the current admin can set a new admin. |"), "{table}");
@@ -144,24 +144,33 @@ fn comparison_verdicts_name_both_operands() {
 
 #[test]
 fn frames_expose_typed_results_and_effects_build_from_typed_events() {
-    let returned = setAdminCall { admin: ADMIN };
+    let call = setAdminCall { admin: ADMIN };
+    let mut padded = balanceOfCall::abi_encode_returns(&U256::from(7));
+    padded.push(0);
     let effects = Effects::<()>::default()
         .event(PORTAL, &AdminSet { admin: ADMIN })
         .call(
             ADMIN,
             PORTAL,
-            &returned,
+            &call,
             Outcome::Return(balanceOfCall::abi_encode_returns(&U256::from(7)).into()),
         )
         .call(
             MALLORY,
             PORTAL,
-            &returned,
+            &call,
             Outcome::Revert(
                 IPortal::Unauthorized { caller: MALLORY }
                     .abi_encode()
                     .into(),
             ),
+        )
+        .call(ADMIN, PORTAL, &call, Outcome::Return(padded.into()))
+        .call(
+            ADMIN,
+            PORTAL,
+            &call,
+            Outcome::Revert(Panic::from(PanicKind::UnderOverflow).abi_encode().into()),
         );
     assert_eq!(
         effects.events::<AdminSet>(PORTAL),
@@ -169,13 +178,36 @@ fn frames_expose_typed_results_and_effects_build_from_typed_events() {
     );
 
     let frames = effects.calls.as_deref().unwrap();
-    assert_eq!(frames[0].returns::<balanceOfCall>(), Some(U256::from(7)));
-    assert!(frames[0].revert::<IPortal::IPortalErrors>().is_none());
+    assert_eq!(
+        frames[0].outcome.returns::<balanceOfCall>(),
+        Some(U256::from(7))
+    );
+    assert!(
+        frames[0]
+            .outcome
+            .revert::<IPortal::IPortalErrors>()
+            .is_none()
+    );
     assert!(matches!(
-        frames[1].revert::<IPortal::IPortalErrors>(),
+        frames[1].outcome.revert::<IPortal::IPortalErrors>(),
         Some(IPortal::IPortalErrors::Unauthorized(e)) if e.caller == MALLORY
     ));
-    assert_eq!(frames[1].returns::<balanceOfCall>(), None);
+    assert_eq!(frames[1].outcome.returns::<balanceOfCall>(), None);
+    assert_eq!(
+        frames[2].outcome.returns::<balanceOfCall>(),
+        Some(U256::from(7))
+    );
+    type Errors = ContractError<IPortal::IPortalErrors>;
+    assert!(matches!(
+        frames[1].outcome.revert::<Errors>(),
+        Some(ContractError::CustomError(
+            IPortal::IPortalErrors::Unauthorized(_)
+        ))
+    ));
+    assert!(matches!(
+        frames[3].outcome.revert::<Errors>(),
+        Some(ContractError::Panic(panic)) if panic.kind() == Some(PanicKind::UnderOverflow)
+    ));
     assert_eq!(
         frames[0].to_string(),
         format!(
@@ -189,7 +221,7 @@ fn frames_expose_typed_results_and_effects_build_from_typed_events() {
 
 #[test]
 fn views_tell_unanswered_calls_from_unexpected_ones() {
-    let answer = |answer: Option<Outcome>| FnViews {
+    let answering = |answer: Option<Outcome>| FnViews {
         call: move |calls: &[Call]| Ok::<_, String>(vec![answer.clone(); calls.len()]),
         partial: true,
     };
@@ -197,17 +229,20 @@ fn views_tell_unanswered_calls_from_unexpected_ones() {
 
     let seven = balanceOfCall::abi_encode_returns(&U256::from(7));
     assert_eq!(
-        read(answer(Some(Outcome::Return(seven.into())))),
+        read(answering(Some(Outcome::Return(seven.into())))),
         Ok(U256::from(7))
     );
-    assert!(read(answer(None)).unwrap_err().is_not_answered());
+    assert!(read(answering(None)).unwrap_err().is_not_answered());
+    let mut padded = balanceOfCall::abi_encode_returns(&U256::from(7));
+    padded.push(0);
     for outcome in [
         Outcome::Return(Bytes::from_static(&[1])),
+        Outcome::Return(padded.into()),
         Outcome::Revert(Bytes::new()),
         Outcome::Halt,
     ] {
         assert_eq!(
-            read(answer(Some(outcome.clone()))),
+            read(answering(Some(outcome.clone()))),
             Err(ObserveError::Unexpected {
                 call: balanceOfCall::SIGNATURE,
                 to: PORTAL,
@@ -263,8 +298,9 @@ fn a_view_can_be_asked_as_a_third_party() {
         PORTAL,
         balanceOfCall { account: ADMIN },
     )
+    .unwrap()
     .unwrap();
-    assert_eq!(own, Some(Ok(U256::from(7))));
+    assert_eq!(own.returns::<balanceOfCall>(), Some(U256::from(7)));
     let other = view_from(
         &mut Private,
         MALLORY,
@@ -272,7 +308,7 @@ fn a_view_can_be_asked_as_a_third_party() {
         balanceOfCall { account: ADMIN },
     )
     .unwrap();
-    assert!(matches!(other, Some(Err(_))));
+    assert!(matches!(other, Some(Outcome::Revert(_))));
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

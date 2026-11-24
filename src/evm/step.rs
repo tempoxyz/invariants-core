@@ -1,11 +1,14 @@
-use std::{fmt, ops::Deref, rc::Rc};
+use std::{fmt, ops::Deref, sync::Arc};
 
-use alloy_primitives::{Address, I256, Log, U256};
+use alloy_primitives::{Address, Log, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 
-use crate::{CallKind, Frame, Outcome};
+use super::{CallKind, Frame, Outcome};
+use crate::{Check, Checked};
 
+/// A storage slot a step changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SlotChange {
     pub address: Address,
     pub slot: U256,
@@ -13,54 +16,43 @@ pub struct SlotChange {
     pub after: U256,
 }
 
-impl SlotChange {
-    pub fn delta(&self) -> Option<I256> {
-        let before = I256::try_from(self.before).ok()?;
-        let after = I256::try_from(self.after).ok()?;
-        after.checked_sub(before)
-    }
-}
-
-pub fn net_delta<'a>(changes: impl IntoIterator<Item = &'a SlotChange>) -> Option<I256> {
-    changes
-        .into_iter()
-        .try_fold(I256::ZERO, |sum, change| sum.checked_add(change.delta()?))
-}
-
 /// What a step did, shared by the steps of every model it is judged over.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Effects<T = ()> {
     pub changes: Vec<SlotChange>,
     pub logs: Vec<Log>,
-    /// The call frames in the order they were entered; `None` when the runner does not trace
-    /// calls.
+    /// The call frames in entry order, `None` when the runner does not trace calls.
     pub calls: Option<Vec<Frame>>,
-    pub tx: T,
+    /// What ran, such as a transaction, a system call or a block.
+    pub ran: T,
 }
 
 impl<T> Effects<T> {
+    /// Whether the step changed any of `address`'s slots.
     pub fn touched(&self, address: Address) -> bool {
         self.changes.iter().any(|change| change.address == address)
     }
 
+    /// The slots the step changed at `address`.
     pub fn changes_at(&self, address: Address) -> impl Iterator<Item = &SlotChange> {
         self.changes
             .iter()
             .filter(move |change| change.address == address)
     }
 
+    /// The logs `address` emitted, in order.
     pub fn logs_from(&self, address: Address) -> impl Iterator<Item = &Log> {
         self.logs.iter().filter(move |log| log.address == address)
     }
 
-    /// The `E` events `address` emitted, in order; logs that do not decode as `E` are skipped.
+    /// The `E` events `address` emitted, in order, skipping logs that do not decode as `E`.
     pub fn events<E: SolEvent>(&self, address: Address) -> Vec<E> {
         self.logs_from(address)
             .filter_map(|log| E::decode_log_data(&log.data).ok())
             .collect()
     }
 
-    /// The frames that ran `target`'s code on its own storage; none when calls were not traced.
+    /// The frames that ran `target`'s code on its own storage, none when calls were not traced.
     pub fn calls_to(&self, target: Address) -> impl Iterator<Item = &Frame> {
         self.calls
             .iter()
@@ -83,8 +75,7 @@ impl<T> Effects<T> {
         self
     }
 
-    /// Appends a top-level call from `caller` to `target`, ending in `outcome`, and marks the
-    /// calls traced.
+    /// Appends a top-level `call` from `caller` to `target`, marking the calls traced.
     pub fn call<C: SolCall>(
         mut self,
         caller: Address,
@@ -110,11 +101,11 @@ impl<T> Effects<T> {
 pub struct Step<M, T = ()> {
     pub pre: M,
     pub post: M,
-    pub effects: Rc<Effects<T>>,
+    pub effects: Arc<Effects<T>>,
 }
 
 impl<M, T> Step<M, T> {
-    pub fn new(pre: M, post: M, effects: impl Into<Rc<Effects<T>>>) -> Self {
+    pub fn new(pre: M, post: M, effects: impl Into<Arc<Effects<T>>>) -> Self {
         Self {
             pre,
             post,
@@ -131,8 +122,16 @@ impl<M, T> Deref for Step<M, T> {
     }
 }
 
-/// A model that events change: the model before a step with the step's events replayed onto it
-/// is the model after the step.
+/// A model whose steps have checks: a [`Step`] over it is [`Checked`] against them.
+pub trait StepChecked<T: 'static = (), F: 'static = ()>: Sized + 'static {
+    const STEP_CHECKS: &'static [Check<Step<Self, T>, F>];
+}
+
+impl<M: StepChecked<T, F>, T: 'static, F: 'static> Checked<F> for Step<M, T> {
+    const CHECKS: &'static [Check<Self, F>] = M::STEP_CHECKS;
+}
+
+/// A model that events change: the step's events replayed onto `pre` give `post`.
 pub trait Replay<E>: Sized {
     /// Why the events do not apply, such as a balance that would leave its type.
     type Error: fmt::Display;

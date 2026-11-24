@@ -2,8 +2,7 @@ use std::fmt::{Display, Write as _};
 
 use crate::AnyCheck;
 
-/// The checks as a Markdown table, one row each in the order given: the readable list of
-/// invariants a specification links to, generated so it never drifts from what runs.
+/// The checks as a Markdown table, one row each in the order given.
 pub fn markdown<'a, F: Display + 'a>(
     checks: impl IntoIterator<Item = &'a dyn AnyCheck<F>>,
 ) -> String {

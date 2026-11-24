@@ -1,8 +1,7 @@
 use std::fmt;
 
-/// What a check asserts and where it applies, kept beside the check so the readable list of
-/// invariants (see [`crate::markdown`]) and the gating of a run come from the same place. `F` is
-/// the runner's fork type, ordered by activation.
+/// What a check asserts and where it applies, the source of [`crate::markdown`] and fork gating.
+/// `F` is the runner's fork type, ordered by activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Meta<F = ()> {
@@ -11,13 +10,14 @@ pub struct Meta<F = ()> {
     /// The specification that states it, such as `TIP-1137`.
     pub tip: Option<&'static str>,
     pub severity: Option<Severity>,
-    /// The first fork the invariant holds from; every fork when `None`.
+    /// The first fork the invariant holds from, every fork when `None`.
     pub since: Option<F>,
-    /// The first fork the invariant no longer holds from; none when `None`.
+    /// The first fork the invariant no longer holds from, `None` if it never stops.
     pub until: Option<F>,
 }
 
 impl<F> Meta<F> {
+    /// No metadata, applying at every fork.
     pub const EMPTY: Self = Self {
         doc: "",
         tip: None,
