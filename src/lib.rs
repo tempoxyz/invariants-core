@@ -1,17 +1,20 @@
-mod assertion;
 mod check;
-mod signal;
-mod step;
-mod views;
+mod doc;
+mod evm;
+mod history;
+mod meta;
+mod pair;
+#[cfg(feature = "sink")]
+mod sink;
 
-pub use assertion::{
-    Assertion, AssertionKind, Condition, Location, Op, Sink, Value, always, sometimes,
-};
-pub use check::{
-    AnyCheck, Check, Checked, Counts, Emit, Report, StepChecked, Verdict, Violation, assert, each,
-};
-pub use signal::{Sig, SigKind, SigName};
-pub use step::{Replay, SlotChange, Step, net_delta};
-pub use views::{
-    Complete, Observe, ObserveError, Views, answered, decode, optional, view, view_many,
-};
+pub use check::{AnyCheck, Check, Checked, Counts, Emit, Report, Verdict, Violation, each};
+pub use doc::markdown;
+pub use evm::*;
+pub use history::{Fold, Folded, History};
+pub use meta::{Meta, Severity};
+pub use pair::{Diff, Pair};
+#[cfg(feature = "sink")]
+pub use sink::*;
+
+#[cfg(test)]
+mod tests;

@@ -7,8 +7,10 @@ publish = false
 
 [features]
 serde = ["dep:serde", "alloy-primitives/serde"]
+# `Sink`-based assertions (`always`, `sometimes`, `assert`), for reporting to an external runner.
+sink = []
 
 [dependencies]
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }
-alloy-sol-types = { version = "1", default-features = false, features = ["std"] }
+alloy-sol-types = { version = "1.7", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"], optional = true }
